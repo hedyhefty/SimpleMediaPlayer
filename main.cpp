@@ -1,11 +1,14 @@
 #include <iostream>
-#include <string>
-#define SDL_MAIN_HANDLED
+
+
 
 extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
 #include "libswscale/swscale.h"
+
+	// SDL define main and we should handle it with macro
+#define SDL_MAIN_HANDLED
 #include "SDL2/SDL.h"
 #include "SDL2/SDL_thread.h"
 
@@ -20,7 +23,7 @@ int main() {
 	//checkInit();
 	AVFormatContext* pFormatCtx = nullptr;
 	int i, videoStream;
-	AVCodecContext* pCodecCtxOrig = nullptr;
+	//AVCodecContext* pCodecCtxOrig = nullptr;    now useless.
 	AVCodecContext* pCodecCtx = nullptr;
 	AVCodec* pCodec = nullptr;
 	AVFrame* pFrame = nullptr;
@@ -46,7 +49,8 @@ int main() {
 
 	videoStream = -1;
 	for (i = 0; i < pFormatCtx->nb_streams; ++i) {
-		if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+		// Deprecated: ...->codec->codec_type
+		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
 			videoStream = i;
 			break;
 		}
@@ -58,21 +62,44 @@ int main() {
 
 	// TODO: continue.
 
+	/* Dprecated
 	pCodecCtxOrig = pFormatCtx->streams[videoStream]->codec;
+	*/
+	
+	pCodecCtx = avcodec_alloc_context3(nullptr);
+	if (pCodecCtx == nullptr) {
+		std::cout << "Couldn't allocate codec" << std::endl;
+		return -1;
+	}
+
+	avcodec_parameters_to_context(pCodecCtx, pFormatCtx->streams[videoStream]->codecpar);
+
+	/* Check pointer
+	if (pCodecCtx == pFormatCtx->streams[videoStream]->codec) {
+		std::cout << "Supprisingly, they point to the same object." << std::endl;
+	}
+	else{
+		std::cout << "As what I thought."<<std::endl;
+	}
+	*/
 
 	// Find decoder
-	pCodec = avcodec_find_decoder(pCodecCtxOrig->codec_id);
+	pCodec = avcodec_find_decoder(pCodecCtx->codec_id);
 	if (pCodec == nullptr) {
 		std::cout << stderr << "Unsupported codec!" << std::endl;
 		return -1;
 	}
 
-	// Copy context(must not use origin pointer)
+	/* Copy context(must not use origin pointer)      now useless
 	pCodecCtx = avcodec_alloc_context3(pCodec);
+	/*
+
+	/* Deprecated
 	if (avcodec_copy_context(pCodecCtx, pCodecCtxOrig) != 0) {
 		std::cout << stderr << "Couldn't copy codec context" << std::endl;
 		return -1;
 	}
+	*/
 
 	// Open codec
 	if (avcodec_open2(pCodecCtx, pCodec, nullptr) < 0) {
@@ -91,7 +118,7 @@ int main() {
 		pCodecCtx->height,
 		0
 	);
-	
+
 	if (!screen) {
 		std::cout << stderr << "SDL: couldn't create window - exiting" << std::endl;
 		return -1;
@@ -131,9 +158,9 @@ int main() {
 	// set up YV12 pixel array
 	size_t yPlaneSz = pCodecCtx->width * pCodecCtx->height;
 	size_t uvPlaneSz = pCodecCtx->width * pCodecCtx->height / 4;
-	Uint8* yPlane = (Uint8*)malloc(yPlaneSz);
-	Uint8* uPlane = (Uint8*)malloc(uvPlaneSz);
-	Uint8* vPlane = (Uint8*)malloc(uvPlaneSz);
+	Uint8* yPlane = new Uint8[yPlaneSz];
+	Uint8* uPlane = new Uint8[uvPlaneSz];
+	Uint8* vPlane = new Uint8[uvPlaneSz];
 
 	if (!yPlane || !uPlane || !vPlane) {
 		std::cout << stderr << "Could not allocate pixel buffers - exiting" << std::endl;
@@ -141,16 +168,24 @@ int main() {
 	}
 
 	int uvPitch = pCodecCtx->width / 2;
-	
+
 	SDL_Event sdlEvent;
 
 	while (av_read_frame(pFormatCtx, &packet) >= 0) {
 		if (packet.stream_index == videoStream) {
 			// Decode
-			avcodec_decode_video2(pCodecCtx, pFrame, &frameFinished, &packet);
 
-			if (frameFinished) {
-				AVPicture pict;
+			/* Deprecated:
+			avcodec_decode_video2(pCodecCtx, pFrame, &frameFinished, &packet);
+			*/
+
+			avcodec_send_packet(pCodecCtx, &packet);
+			frameFinished = avcodec_receive_frame(pCodecCtx, pFrame);
+
+			if (frameFinished == 0) {
+				// Deprecated: AVPicture
+
+				AVFrame pict;
 				pict.data[0] = yPlane;
 				pict.data[1] = uPlane;
 				pict.data[2] = vPlane;
@@ -181,9 +216,9 @@ int main() {
 		}
 
 		//Free packet by av_read_frame
-		av_free_packet(&packet);
+		av_packet_unref(&packet);
 		SDL_PollEvent(&sdlEvent);
-		switch (sdlEvent.type){
+		switch (sdlEvent.type) {
 		case SDL_QUIT:
 			SDL_DestroyTexture(texture);
 			SDL_DestroyRenderer(renderer);
@@ -198,13 +233,12 @@ int main() {
 
 	// Free YUV frame
 	av_frame_free(&pFrame);
-	free(yPlane);
-	free(uPlane);
-	free(vPlane);
+	delete[] yPlane;
+	delete[] uPlane;
+	delete[] vPlane;
 
 	// Close codec
 	avcodec_close(pCodecCtx);
-	avcodec_close(pCodecCtxOrig);
 
 	//Close video file
 	avformat_close_input(&pFormatCtx);
