@@ -331,7 +331,7 @@ void video_refresh_timer(void* userdata) {
 	}
 }
 
-static int queue_picture(VideoState* is, AVFrame* pFrame) {
+int queue_picture(VideoState* is, AVFrame* pFrame) {
 	myFrame* vp;
 
 	// wait until have place to write
@@ -378,16 +378,15 @@ int video_thread(void* arg) {
 			// quit getting packets
 			break;
 		}
-
 		// decode video frame
 		avcodec_send_packet(is->video_ctx, packet);
 		frameFinished = avcodec_receive_frame(is->video_ctx, pFrame);
-
-		if (frameFinished) {
+		if (frameFinished == 0) {
 			//queue frame to frame queue
 			queue_picture(is, pFrame);
-			av_frame_unref(pFrame);
+			
 		}
+		av_frame_unref(pFrame);
 
 		av_packet_unref(packet);
 	}
@@ -595,7 +594,7 @@ static void event_loop(VideoState* is) {
 
 void checkInit();
 
-const char* SRC_FILE = "test2.mpg";
+const char* SRC_FILE = "test3.mpg";
 
 int main() {
 	VideoState* is;
