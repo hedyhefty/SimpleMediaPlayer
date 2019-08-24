@@ -1,280 +1,86 @@
-#include <iostream>
+#include "util.h"
 
-extern "C" {
-#include "libavcodec/avcodec.h"
-#include "libavformat/avformat.h"
-#include "libswscale/swscale.h"
-#include "libavutil/avstring.h"
-
-	// SDL define main and we should handle it with macro
-#define SDL_MAIN_HANDLED
-#include "SDL2/SDL.h"
-#include "SDL2/SDL_thread.h"
-
-#include <stdio.h>
-#include <math.h>
-}
-
-#define SDL_AUDIO_BUFFER_SIZE 1024
-#define MAX_AUDIO_FRAME_SIZE 192000
-
-#define MAX_AUDIOQ_SIZE (5 * 16 * 1024)
-#define MAX_VIDEOQ_SIZE (5 * 256 * 1024)
-
-#define FF_REFRESH_EVENT (SDL_USEREVENT)
-#define FF_QUIT_EVENT (SDL_USEREVENT + 1)
-
-const size_t VIDEO_PICTURE_QUEUE_SIZE = 90;
-
-struct PacketQueue {
-	PacketQueue() :
-		first_pkt(nullptr), 
-		last_pkt(nullptr),
-		nb_packets(0), 
-		size(0) {
-		mutex = SDL_CreateMutex();
-		cond = SDL_CreateCond();
-	}
-
-	AVPacketList* first_pkt;
-	AVPacketList* last_pkt;
-	int nb_packets;
-	int size;
-	SDL_mutex* mutex;
-	SDL_cond* cond;
-};
-
-struct myFrame {
-	myFrame() {
-		frame = av_frame_alloc();
-		lastframe_flag = false;
-	}
-	AVFrame* frame;
-	bool lastframe_flag;
-};
-
-struct myFrameQueue {
-	myFrameQueue() :
-		max_size(VIDEO_PICTURE_QUEUE_SIZE),
-		write_index(0), 
-		read_index(0), 
-		size(0), 
-		queue() {
-		mutex = SDL_CreateMutex();
-
-		std::cout << "framequeue init called" << std::endl;
-		if (!mutex) {
-			std::cout << "SDL: cannot create mutex" << std::endl;
-		}
-
-		cond = SDL_CreateCond();
-		if (!cond) {
-			std::cout << "SDL: cannot create cond" << std::endl;
-		}
-	}
-
-	myFrame queue[VIDEO_PICTURE_QUEUE_SIZE];
-	size_t size;
-	size_t max_size;
-	size_t read_index;
-	size_t write_index;
-	SDL_mutex* mutex;
-	SDL_cond* cond;
-};
-
-struct YUVDisplayPar {
-	YUVDisplayPar() :
-		pict(), 
-		yPlaneSz(0),
-		uvPlaneSz(0), 
-		yPlane(nullptr), 
-		uPlane(nullptr),
-		vPlane(nullptr), 
-		uvPitch(0) {
-	}
-
-	size_t yPlaneSz;
-	size_t uvPlaneSz;
-	Uint8* yPlane;
-	Uint8* uPlane;
-	Uint8* vPlane;
-	int uvPitch;
-	AVFrame pict;
-};
-
-
-//void packet_queue_init(PacketQueue* q);
-struct VideoState {
-	VideoState() :
-		filename(""), 
-		pFrameQ(), 
-		video_queue(),
-	pFormatCtx(nullptr),
-	video_st_index(0),
-	video_st(nullptr),
-	sws_ctx(nullptr),
-	parse_tid(nullptr),
-	video_tid(nullptr),
-	quit(0){
-		video_ctx = avcodec_alloc_context3(nullptr);
-	}
-
-	AVFormatContext* pFormatCtx;
-
-	/*int audio_st_index;
-	AVStream* audio_st;
-	AVCodecContext* audio_ctx;
-	PacketQueue audio_queue;
-	uint8_t audio_buf[(MAX_AUDIO_FRAME_SIZE * 3) / 2];
-	unsigned int audio_buf_size;
-	unsigned int audio_buf_index;
-	AVFrame audio_frame;
-	AVPacket audio_pkt_data;*/
-
-	int video_st_index;
-	AVStream* video_st;
-	AVCodecContext* video_ctx;
-	PacketQueue video_queue;
-	SwsContext* sws_ctx;
-	SDL_Rect rect;  //output rectangle
-	YUVDisplayPar yuv_display;
-	
-	myFrameQueue pFrameQ;
-
-	SDL_Thread* parse_tid;
-	SDL_Thread* video_tid;
-
-	char filename[1024];
-	int quit;
-};
 
 SDL_Window* screen;
-SDL_mutex* screen_mutex;
 static SDL_Renderer* renderer;
 SDL_Texture* texture;
 
 VideoState* global_video_state;
 
-int packet_queue_put(PacketQueue* q, AVPacket* pkt) {
-	AVPacketList* pkt1;
-	if (av_packet_make_refcounted(pkt) < 0) {
+void init_calculate_rect(VideoState* is);
+
+Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque);
+
+void schedule_refresh(VideoState* is, int delay);
+
+void video_display(VideoState* is);
+
+void video_refresh_timer(void* userdata);
+
+int queue_picture(VideoState* is, AVFrame* pFrame);
+
+int video_thread(void* arg);
+
+int stream_component_open(VideoState* is, int stream_index);
+
+int demux_thread(void* arg);
+
+static void event_loop(VideoState* is);
+
+const char* SRC_FILE = "test4.mp4";
+
+int main() {
+	VideoState* is = new VideoState;
+
+	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
+		std::cout << "SDL init failed" << std::endl;
 		return -1;
 	}
 
-	pkt1 = (AVPacketList*)av_malloc(sizeof(AVPacketList));
-	if (!pkt1) {
+	screen = SDL_CreateWindow(
+		"SimplePlayer32",
+		SDL_WINDOWPOS_UNDEFINED,
+		SDL_WINDOWPOS_UNDEFINED,
+		640,
+		480,
+		0
+	);
+
+	if (!screen) {
+		std::cout << "SDL: cannot create window" << std::endl;
 		return -1;
 	}
 
-	av_packet_ref(&pkt1->pkt, pkt);
-	//pkt1->pkt = *pkt;
-	pkt1->next = nullptr;
+	renderer = SDL_CreateRenderer(screen, -1, 0);
 
-	SDL_LockMutex(q->mutex);
-
-	// insert to the end of the queue, update last_pkt
-	if (!q->last_pkt) {
-		// if this is the first pkt, update first_pkt also
-		q->first_pkt = pkt1;
+	if (!renderer) {
+		std::cout << "SDL: cannot create renderer" << std::endl;
+		return -1;
 	}
-	else {
-		q->last_pkt->next = pkt1;
-	}
-	q->last_pkt = pkt1;
-	++(q->nb_packets);
-	q->size += pkt1->pkt.size;
 
-	SDL_CondSignal(q->cond);
-	SDL_UnlockMutex(q->mutex);
+	av_strlcpy(is->filename, SRC_FILE, sizeof(is->filename));
+
+	std::cout << is->filename << std::endl;
+
+	schedule_refresh(is, 40);
+
+	is->demux_tid = SDL_CreateThread(demux_thread, "demux_t", is);
+	if (!is->demux_tid) {
+		av_free(is);
+		return -1;
+	}
+
+	if (!renderer) {
+		std::cout << "SDL: cannot create renderer" << std::endl;
+	}
+
+	event_loop(is);
+
 	return 0;
 }
 
-int packet_queue_get(PacketQueue* q, AVPacket* pkt, int block) {
-	AVPacketList* pkt1;
-	int ret;
-
-	SDL_LockMutex(q->mutex);
-
-	for (;;) {
-		if (global_video_state->quit) {
-			ret = -1;
-			break;
-		}
-
-		// get the first element in queue, update pointers
-		pkt1 = q->first_pkt;
-		if (pkt1) {
-			q->first_pkt = pkt1->next;
-			if (!q->first_pkt) {
-				q->last_pkt = nullptr;
-			}
-			--(q->nb_packets);
-			q->size -= pkt1->pkt.size;
-			*pkt = pkt1->pkt;
-			av_free(pkt1);
-			ret = 1;
-			break;
-		}
-		else if (!block) {
-			ret = 0;
-			break;
-		}
-		else {
-			SDL_CondWait(q->cond, q->mutex);
-		}
-	}
-	SDL_UnlockMutex(q->mutex);
-
-	return ret;
-}
-
-myFrame* frame_queue_get_last_ref(myFrameQueue* f) {
-	return &f->queue[f->read_index];
-}
-
-// dequeue read queue
-void frame_queue_dequeue(myFrameQueue* f) {
-	av_frame_unref(f->queue[f->read_index].frame);
-	if (++(f->read_index) == f->max_size) {
-		f->read_index = 0;
-	}
-
-	SDL_LockMutex(f->mutex);
-	--(f->size);
-	SDL_CondSignal(f->cond);
-	SDL_UnlockMutex(f->mutex);
-}
-
-// check and get writable position in frame queue
-myFrame* frame_queue_writablepos_ref(myFrameQueue* f) {
-	SDL_LockMutex(f->mutex);
-	while (f->size >= f->max_size) {
-		SDL_CondWait(f->cond, f->mutex);
-	}
-	SDL_UnlockMutex(f->mutex);
-	return &f->queue[f->write_index];
-}
-
-void init_YUV_display_par(VideoState* is) {
-	// set up YV12 pixel array
-	is->yuv_display.yPlaneSz = is->video_ctx->width * is->video_ctx->height;
-	is->yuv_display.uvPlaneSz = is->video_ctx->width * is->video_ctx->height / 4;
-	is->yuv_display.yPlane = new Uint8[is->yuv_display.yPlaneSz];
-	is->yuv_display.uPlane = new Uint8[is->yuv_display.uvPlaneSz];
-	is->yuv_display.vPlane = new Uint8[is->yuv_display.uvPlaneSz];
-
-	is->yuv_display.uvPitch = is->video_ctx->width / 2;
-
-	is->yuv_display.pict.data[0] = is->yuv_display.yPlane;
-	is->yuv_display.pict.data[1] = is->yuv_display.uPlane;
-	is->yuv_display.pict.data[2] = is->yuv_display.vPlane;
-	is->yuv_display.pict.linesize[0] = is->video_ctx->width;
-	is->yuv_display.pict.linesize[1] = is->yuv_display.uvPitch;
-	is->yuv_display.pict.linesize[2] = is->yuv_display.uvPitch;
-}
-
 void init_calculate_rect(VideoState* is) {
-	float aspect_ratio;
+	double aspect_ratio;
 	int ww;
 	int wh;
 	int w;
@@ -290,8 +96,8 @@ void init_calculate_rect(VideoState* is) {
 			* is->video_ctx->width / is->video_ctx->height;
 	}
 	if (aspect_ratio <= 0.0) {
-		aspect_ratio = (float)is->video_ctx->width
-			/ (float)is->video_ctx->height;
+		aspect_ratio = (double)is->video_ctx->width
+			/ (double)is->video_ctx->height;
 	}
 
 	SDL_GetWindowSize(screen, &ww, &wh);
@@ -312,7 +118,7 @@ void init_calculate_rect(VideoState* is) {
 	is->rect.h = h;
 }
 
-static Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque) {
+Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque) {
 	SDL_Event event;
 	event.type = FF_REFRESH_EVENT;
 	event.user.data1 = opaque;
@@ -322,7 +128,7 @@ static Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque) {
 	return 0;
 }
 
-static void schedule_refresh(VideoState* is, int delay) {
+void schedule_refresh(VideoState* is, int delay) {
 	SDL_AddTimer(delay, sdl_refresh_timer_cb, is);
 }
 
@@ -357,10 +163,17 @@ void video_display(VideoState* is) {
 		is->yuv_display.vPlane,
 		is->yuv_display.uvPitch
 	);
-	SDL_LockMutex(screen_mutex);
 	SDL_RenderClear(renderer);
 	SDL_RenderCopy(renderer, texture, nullptr, &is->rect);
 	SDL_RenderPresent(renderer);
+
+	if (vp->lastframe_flag) {
+		SDL_Event sdl_event;
+		sdl_event.type = FF_QUIT_EVENT;
+		sdl_event.user.data1 = is;
+		SDL_Delay(100);
+		SDL_PushEvent(&sdl_event);
+	}
 	//av_frame_free(&frame);
 }
 
@@ -392,11 +205,15 @@ int queue_picture(VideoState* is, AVFrame* pFrame) {
 	// wait until have place to write
 	vp = frame_queue_writablepos_ref(&is->pFrameQ);
 
-	if (is->quit) {
+	if (!vp || is->quit == 1) {
 		return -1;
 	}
 
 	av_frame_move_ref(vp->frame, pFrame);
+
+	if (is->video_queue.all_sent && is->video_queue.nb_packets == 0) {
+		vp->lastframe_flag = true;
+	}
 
 	// push frame queue
 	if (++(is->pFrameQ.write_index) == is->pFrameQ.max_size) {
@@ -404,7 +221,12 @@ int queue_picture(VideoState* is, AVFrame* pFrame) {
 	}
 	SDL_LockMutex(is->pFrameQ.mutex);
 	++is->pFrameQ.size;
+	SDL_CondSignal(is->pFrameQ.cond);
 	SDL_UnlockMutex(is->pFrameQ.mutex);
+
+	if (is->quit == 1) {
+		return -1;
+	}
 
 	return 0;
 }
@@ -421,7 +243,13 @@ int video_thread(void* arg) {
 	int ret = 0;
 
 	for (;;) {
+		if (is->quit == 1) {
+			break;
+		}
+
 		ret = packet_queue_get(&is->video_queue, packet, 1);
+
+		
 		if (ret < 0) {
 			// quit getting packets
 			break;
@@ -437,9 +265,15 @@ int video_thread(void* arg) {
 		av_frame_unref(pFrame);
 
 		av_packet_unref(packet);
+
+		if (is->video_queue.all_sent && is->video_queue.nb_packets == 0) {
+			break;
+		}
 	}
 
 	av_frame_free(&pFrame);
+
+	std::cout << "video thread return" << std::endl;
 
 	return 0;
 }
@@ -449,7 +283,7 @@ int stream_component_open(VideoState* is, int stream_index) {
 	AVCodecContext* codecCtx = nullptr;
 	AVCodec* codec = nullptr;
 
-	if (stream_index < 0 || stream_index >= pFormatCtx->nb_streams) {
+	if (stream_index < 0 || stream_index >= (int)pFormatCtx->nb_streams) {
 		std::cout << "stream index out of range" << std::endl;
 		return -1;
 	}
@@ -531,6 +365,9 @@ int demux_thread(void* arg) {
 	is->video_st_index = -1;
 
 	global_video_state = is;
+	quit_ref = &global_video_state->quit;
+
+	//int i = 0;
 
 	// open file
 	if (avformat_open_input(&pFormatCtx, is->filename, nullptr, nullptr) != 0) {
@@ -548,12 +385,13 @@ int demux_thread(void* arg) {
 	av_dump_format(pFormatCtx, 0, is->filename, 0);
 
 	// find first stream available
-	for (int i = 0; i < pFormatCtx->nb_streams; ++i) {
+	for (size_t i = 0; i < pFormatCtx->nb_streams; ++i) {
 		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO
 			&& video_index < 0) {
 			video_index = i;
 		}
 	}
+	
 
 	if (video_index >= 0) {
 		int flag = stream_component_open(is, video_index);
@@ -567,27 +405,35 @@ int demux_thread(void* arg) {
 		goto fail;
 	}
 
+	
+
 	for (;;) {
-		if (is->quit) {
+		if (is->quit == 1) {
 			break;
 		}
+
+		
 
 		if (is->video_queue.size > MAX_VIDEOQ_SIZE) {
 			SDL_Delay(10);
 			continue;
 		}
-
-		if (av_read_frame(is->pFormatCtx, packet) < 0) {
-			if (is->pFormatCtx->pb->error == 0) {
-				// no error, wait for input
-				SDL_Delay(100);
-				continue;
-			}
-			else {
-				break;
-			}
+		//std::cout << i++ << std::endl;
+		int ret = av_read_frame(is->pFormatCtx, packet);
+		if ( ret < 0) {
+			std::cout << ret << std::endl;
+			//if (is->pFormatCtx->pb->error == 0) {
+			//	// no error, wait for input
+			//	SDL_Delay(1);
+			//	continue;
+			//}
+			//else {
+			//	break;
+			//}
+			is->video_queue.all_sent = true;
+			break;
 		}
-
+		
 		// send packet to queue
 		if (packet->stream_index == is->video_st_index) {
 			packet_queue_put(&is->video_queue, packet);
@@ -596,9 +442,7 @@ int demux_thread(void* arg) {
 		av_packet_unref(packet);
 	}
 
-	while (!is->quit) {
-		SDL_Delay(100);
-	}
+	goto straight_return;
 
 fail:
 	SDL_Event sdl_event;
@@ -606,6 +450,8 @@ fail:
 	sdl_event.user.data1 = is;
 	SDL_PushEvent(&sdl_event);
 
+straight_return:
+	std::cout << "demux thread return" << std::endl;
 	return 0;
 }
 
@@ -617,9 +463,20 @@ static void event_loop(VideoState* is) {
 		switch (sdl_event.type) {
 		case FF_QUIT_EVENT:
 		case SDL_QUIT:
+
 			is->quit = 1;
+
 			SDL_CondSignal(is->video_queue.cond);
+			SDL_CondSignal(is->pFrameQ.cond);
+			std::cout << "signal sent" << std::endl;
+
+			SDL_WaitThread(is->demux_tid, nullptr);
+			SDL_WaitThread(is->video_tid, nullptr);
+			
 			SDL_Quit();
+			std::cout << "exit" << std::endl;
+
+			goto exit;
 			break;
 		case FF_REFRESH_EVENT:
 			video_refresh_timer(sdl_event.user.data1);
@@ -628,71 +485,7 @@ static void event_loop(VideoState* is) {
 			break;
 		}
 	}
-}
 
-void checkInit();
-
-const char* SRC_FILE = "test3.mpg";
-
-int main() {
-	VideoState* is = new VideoState;
-
-	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
-		std::cout << "SDL init failed" << std::endl;
-		return -1;
-	}
-
-	screen = SDL_CreateWindow(
-		"SimplePlayer32",
-		SDL_WINDOWPOS_UNDEFINED,
-		SDL_WINDOWPOS_UNDEFINED,
-		640,
-		480,
-		0
-	);
-
-	if (!screen) {
-		std::cout << "SDL: cannot create window" << std::endl;
-		return -1;
-	}
-
-	renderer = SDL_CreateRenderer(screen, -1, 0);
-
-	if (!renderer) {
-		std::cout << "SDL: cannot create renderer" << std::endl;
-		return -1;
-	}
-
-	screen_mutex = SDL_CreateMutex();
-
-	av_strlcpy(is->filename, SRC_FILE, sizeof(is->filename));
-
-	std::cout << is->filename << std::endl;
-
-	schedule_refresh(is, 40);
-
-	is->parse_tid = SDL_CreateThread(demux_thread, "demux_t", is);
-	if (!is->parse_tid) {
-		av_free(is);
-		return -1;
-	}
-
-	if (!renderer) {
-		std::cout << "SDL: cannot create renderer" << std::endl;
-	}
-
-	event_loop(is);
-
-	return 0;
-}
-
-void checkInit() {
-	if (SDL_Init(SDL_INIT_VIDEO)) {
-		std::cout << "SDL init Failed." << std::endl;
-	}
-	else {
-		std::cout << "SDL init succeed." << std::endl;
-	}
-
-	std::cout << avcodec_configuration() << std::endl;
+exit:
+	return;
 }
