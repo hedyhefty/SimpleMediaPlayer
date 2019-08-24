@@ -9,6 +9,10 @@ public:
 		frame = av_frame_alloc();
 		lastframe_flag = false;
 	}
+	~myFrame() {
+		av_frame_free(&frame);
+	}
+
 	AVFrame* frame;
 	bool lastframe_flag;
 };
@@ -32,6 +36,11 @@ public:
 		if (!cond) {
 			std::cout << "SDL: cannot create cond" << std::endl;
 		}
+	}
+
+	~myFrameQueue() {
+		SDL_DestroyMutex(mutex);
+		SDL_DestroyCond(cond);
 	}
 
 	myFrame queue[VIDEO_PICTURE_QUEUE_SIZE];

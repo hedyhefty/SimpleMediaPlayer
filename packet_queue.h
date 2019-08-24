@@ -13,6 +13,21 @@ public:
 		cond = SDL_CreateCond();
 	}
 
+	~PacketQueue() {
+		SDL_DestroyCond(cond);
+		SDL_DestroyMutex(mutex);
+
+		if (first_pkt != nullptr) {
+			AVPacketList* dpkt;
+			while (first_pkt != last_pkt) {
+				dpkt = first_pkt;
+				first_pkt = first_pkt->next;
+				av_free(dpkt);
+			}
+			av_free(first_pkt);
+		}
+	}
+
 	AVPacketList* first_pkt;
 	AVPacketList* last_pkt;
 	int nb_packets;
@@ -80,7 +95,9 @@ int packet_queue_get(PacketQueue* q, AVPacket* pkt, int block) {
 			--(q->nb_packets);
 			q->size -= pkt1->pkt.size;
 			*pkt = pkt1->pkt;
+
 			av_free(pkt1);
+
 			ret = 1;
 			break;
 		}

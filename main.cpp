@@ -74,7 +74,10 @@ int main() {
 		std::cout << "SDL: cannot create renderer" << std::endl;
 	}
 
-	event_loop(is);
+	event_loop(is);	
+
+	int a;
+	std::cin >> a;
 
 	return 0;
 }
@@ -473,7 +476,14 @@ static void event_loop(VideoState* is) {
 			SDL_WaitThread(is->demux_tid, nullptr);
 			SDL_WaitThread(is->video_tid, nullptr);
 			
+			SDL_DestroyTexture(texture);
+			SDL_DestroyRenderer(renderer);
+			SDL_DestroyWindow(screen);
 			SDL_Quit();
+
+			global_video_state = nullptr;
+			delete is;
+
 			std::cout << "exit" << std::endl;
 
 			goto exit;

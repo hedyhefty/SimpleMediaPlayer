@@ -13,6 +13,12 @@ public:
 		uvPitch(0) {
 	}
 
+	~YUVDisplayPar() {
+		delete[] yPlane;
+		delete[] uPlane;
+		delete[] vPlane;
+	}
+
 	size_t yPlaneSz;
 	size_t uvPlaneSz;
 	Uint8* yPlane;

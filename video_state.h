@@ -18,9 +18,9 @@ public:
 	}
 
 	~VideoState() {
-		delete pFormatCtx;
-		delete video_st;
+		avcodec_close(video_ctx);
 		avcodec_free_context(&video_ctx);
+		avformat_close_input(&pFormatCtx);
 	}
 
 	AVFormatContext* pFormatCtx;
