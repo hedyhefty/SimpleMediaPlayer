@@ -15,9 +15,11 @@ extern "C" {
 #include "SDL2/SDL_thread.h"
 
 #include <stdio.h>
+#include <assert.h>
 #include <math.h>
 }
 
+#define SDL_AUDIO_NOT_ALLOW_ANY_CHANGE 0
 
 #define SDL_AUDIO_BUFFER_SIZE 1024
 #define MAX_AUDIO_FRAME_SIZE 192000

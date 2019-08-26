@@ -1,4 +1,5 @@
 #include "util.h"
+#include <iostream>
 
 
 SDL_Window* screen;
@@ -12,6 +13,10 @@ void init_calculate_rect(VideoState* is);
 Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque);
 
 void schedule_refresh(VideoState* is, int delay);
+
+int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size);
+
+void audio_callback(void* userdata, Uint8* stream, int len);
 
 void video_display(VideoState* is);
 
@@ -27,7 +32,7 @@ int demux_thread(void* arg);
 
 static void event_loop(VideoState* is);
 
-const char* SRC_FILE = "test4.mp4";
+const char* SRC_FILE = "test3.mpg";
 
 int main() {
 	VideoState* is = new VideoState;
@@ -36,6 +41,8 @@ int main() {
 		std::cout << "SDL init failed" << std::endl;
 		return -1;
 	}
+	const char* dr = SDL_GetCurrentAudioDriver();
+	std::cout << "Current SDL driver is: " << dr << std::endl;
 
 	screen = SDL_CreateWindow(
 		"SimplePlayer32",
@@ -74,12 +81,19 @@ int main() {
 		std::cout << "SDL: cannot create renderer" << std::endl;
 	}
 
-	event_loop(is);	
+	event_loop(is);
 
 	int a;
 	std::cin >> a;
 
 	return 0;
+}
+
+void program_fail(VideoState* is) {
+	SDL_Event sdl_event;
+	sdl_event.type = FF_QUIT_EVENT;
+	sdl_event.user.data1 = is;
+	SDL_PushEvent(&sdl_event);
 }
 
 void init_calculate_rect(VideoState* is) {
@@ -133,6 +147,91 @@ Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque) {
 
 void schedule_refresh(VideoState* is, int delay) {
 	SDL_AddTimer(delay, sdl_refresh_timer_cb, is);
+}
+
+int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
+
+	int len1 = 0;
+	int data_size = 0;
+	AVPacket* pkt = &is->audio_pkt;
+
+	for (;;) {
+		int got_frame = avcodec_receive_frame(is->audio_ctx, &is->audio_frame);
+
+		if (got_frame == 0) {
+			data_size = av_samples_get_buffer_size(
+				nullptr,
+				is->audio_ctx->channels,
+				is->audio_frame.nb_samples,
+				is->audio_ctx->sample_fmt,
+				1
+			);
+			assert(data_size <= buf_size);
+			memcpy(audio_buf, is->audio_frame.data[0], data_size);
+
+			//len1 = pkt->size;
+			//std::cout << "data size: " << data_size << std::endl;
+
+			is->audio_pkt_data += pkt->size;
+			is->audio_pkt_size -= pkt->size;
+
+			/* We have data, return it and come back for more later */
+			return data_size;
+		}
+
+		if (pkt->data) {
+			av_packet_unref(pkt);
+		}
+
+		if (is->quit) {
+			return -1;
+		}
+
+		if (packet_queue_get(&is->audio_queue, pkt, 1) < 0) {
+			return -1;
+		}
+
+		is->audio_pkt_data = pkt->data;
+		is->audio_pkt_size = pkt->size;
+		int decode_succeed = avcodec_send_packet(is->audio_ctx, pkt);
+		if (decode_succeed < 0) {
+			return -1;
+		}
+	}
+}
+
+void audio_callback(void* userdata, Uint8* stream, int len) {
+
+	VideoState* is = (VideoState*)userdata;
+	int len1;
+	int audio_size;
+
+	while (len > 0) {
+		if (is->audio_buf_index >= is->audio_buf_size) {
+			audio_size = audio_decode_frame(is, is->audio_buf, sizeof(is->audio_buf));
+			//std::wcout << audio_size << std::endl;
+
+			// play silence when error
+			if (audio_size < 0) {
+				is->audio_buf_size = 1024;
+				memset(is->audio_buf, 0, is->audio_buf_size);
+			}
+			else {
+				is->audio_buf_size = audio_size;
+			}
+			is->audio_buf_index = 0;
+		}
+
+		len1 = is->audio_buf_size - is->audio_buf_index;
+		if (len1 > len) {
+			len1 = len;
+		}
+		auto temp = (uint8_t*)is->audio_buf + is->audio_buf_index;
+		memcpy(stream, temp, len1);
+		len -= len1;
+		stream += len1;
+		is->audio_buf_index += len1;
+	}
 }
 
 void video_display(VideoState* is) {
@@ -252,7 +351,7 @@ int video_thread(void* arg) {
 
 		ret = packet_queue_get(&is->video_queue, packet, 1);
 
-		
+
 		if (ret < 0) {
 			// quit getting packets
 			break;
@@ -285,6 +384,10 @@ int stream_component_open(VideoState* is, int stream_index) {
 	AVFormatContext* pFormatCtx = is->pFormatCtx;
 	AVCodecContext* codecCtx = nullptr;
 	AVCodec* codec = nullptr;
+	SDL_AudioSpec wanted_spec;
+	SDL_AudioSpec spec;
+	SDL_AudioDeviceID dev;
+
 
 	if (stream_index < 0 || stream_index >= (int)pFormatCtx->nb_streams) {
 		std::cout << "stream index out of range" << std::endl;
@@ -306,6 +409,39 @@ int stream_component_open(VideoState* is, int stream_index) {
 		return -1;
 	}
 
+	// audio settings
+	if (codecCtx->codec_type == AVMEDIA_TYPE_AUDIO) {
+		// Reset codec to solve audio problem
+		if (codecCtx->sample_fmt == AV_SAMPLE_FMT_S16P) {
+			codecCtx->request_sample_fmt = AV_SAMPLE_FMT_S16;
+		}
+
+		//SDL_zero(wanted_spec);
+		wanted_spec.freq = codecCtx->sample_rate;
+		wanted_spec.format = AUDIO_S16SYS;
+		wanted_spec.channels = codecCtx->channels;
+		wanted_spec.silence = 0;
+		wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE;
+		wanted_spec.callback = audio_callback;
+		wanted_spec.userdata = is;
+
+		if (SDL_OpenAudio(&wanted_spec, &spec) < 0) {
+			std::cout << "cannot open audio" << std::endl;
+			return -1;
+		}
+
+		dev = SDL_OpenAudioDevice(nullptr, 0, &wanted_spec, &spec, SDL_AUDIO_NOT_ALLOW_ANY_CHANGE);
+		if (dev == 0) {
+			return -1;
+		}
+		if (wanted_spec.format != spec.format) {
+			std::cout << "format missmatch" << std::endl;
+			std::cout << wanted_spec.format << std::endl;
+			std::cout << spec.format << std::endl;
+		}
+		//std::cout << dev << std::endl;
+	}
+
 	// open codec
 	if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
 		std::cout << "cannot open codec" << std::endl;
@@ -313,6 +449,18 @@ int stream_component_open(VideoState* is, int stream_index) {
 	}
 
 	switch (codecCtx->codec_type) {
+	case AVMEDIA_TYPE_AUDIO:
+		is->audio_st_index = stream_index;
+		is->audio_st = pFormatCtx->streams[stream_index];
+		is->audio_ctx = codecCtx;
+		is->audio_buf_size = 0;
+		is->audio_buf_index = 0;
+
+		//memset(&is->audio_pkt, 0, sizeof(is->audio_pkt));
+		//SDL_PauseAudio(0);
+		SDL_PauseAudioDevice(dev, 0);
+		break;
+
 	case AVMEDIA_TYPE_VIDEO:
 		is->video_st_index = stream_index;
 		is->video_st = pFormatCtx->streams[stream_index];
@@ -332,6 +480,7 @@ int stream_component_open(VideoState* is, int stream_index) {
 			nullptr,
 			nullptr
 		);
+
 		texture = SDL_CreateTexture(
 			renderer,
 			SDL_PIXELFORMAT_YV12,
@@ -364,8 +513,7 @@ int demux_thread(void* arg) {
 	AVPacket* packet = &pkt1;
 
 	int video_index = -1;
-
-	is->video_st_index = -1;
+	int audio_index = -1;
 
 	global_video_state = is;
 	quit_ref = &global_video_state->quit;
@@ -375,13 +523,15 @@ int demux_thread(void* arg) {
 	// open file
 	if (avformat_open_input(&pFormatCtx, is->filename, nullptr, nullptr) != 0) {
 		std::cout << "Av open input failed" << std::endl;
-		goto fail;
+		program_fail(is);
+		return -1;
 	}
 
 	is->pFormatCtx = pFormatCtx;
 
 	// retrieve stream information
 	if (avformat_find_stream_info(pFormatCtx, nullptr) < 0) {
+		program_fail(is);
 		return -1;
 	}
 
@@ -393,37 +543,50 @@ int demux_thread(void* arg) {
 			&& video_index < 0) {
 			video_index = i;
 		}
+
+		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
+			&& audio_index < 0) {
+			audio_index = i;
+		}
 	}
-	
+
+	if (audio_index >= 0) {
+		int flag = stream_component_open(is, audio_index);
+		if (flag == -1) {
+			program_fail(is);
+			return -1;
+		}
+	}
 
 	if (video_index >= 0) {
 		int flag = stream_component_open(is, video_index);
 		if (flag == -1) {
-			goto fail;
+			program_fail(is);
+			return -1;
 		}
 	}
 
-	if (is->video_st_index < 0) {
+	if (is->video_st_index < 0 || is->audio_st_index < 0) {
 		std::cout << "FFmpeg: cannot open codec" << std::endl;
-		goto fail;
+		program_fail(is);
+		return -1;
 	}
-
-	
 
 	for (;;) {
 		if (is->quit == 1) {
 			break;
 		}
 
-		
-
-		if (is->video_queue.size > MAX_VIDEOQ_SIZE) {
+		if (is->video_queue.size > MAX_VIDEOQ_SIZE
+			|| is->audio_queue.size > MAX_AUDIOQ_SIZE) {
 			SDL_Delay(10);
+			//std::cout << "delaying" << std::endl;
 			continue;
 		}
+
 		//std::cout << i++ << std::endl;
 		int ret = av_read_frame(is->pFormatCtx, packet);
-		if ( ret < 0) {
+		if (ret < 0) {
 			std::cout << ret << std::endl;
 			//if (is->pFormatCtx->pb->error == 0) {
 			//	// no error, wait for input
@@ -436,24 +599,19 @@ int demux_thread(void* arg) {
 			is->video_queue.all_sent = true;
 			break;
 		}
-		
+
 		// send packet to queue
 		if (packet->stream_index == is->video_st_index) {
 			packet_queue_put(&is->video_queue, packet);
 		}
+		else if (packet->stream_index == is->audio_st_index) {
+			packet_queue_put(&is->audio_queue, packet);
+		}
+
 
 		av_packet_unref(packet);
 	}
 
-	goto straight_return;
-
-fail:
-	SDL_Event sdl_event;
-	sdl_event.type = FF_QUIT_EVENT;
-	sdl_event.user.data1 = is;
-	SDL_PushEvent(&sdl_event);
-
-straight_return:
 	std::cout << "demux thread return" << std::endl;
 	return 0;
 }
@@ -475,7 +633,7 @@ static void event_loop(VideoState* is) {
 
 			SDL_WaitThread(is->demux_tid, nullptr);
 			SDL_WaitThread(is->video_tid, nullptr);
-			
+
 			SDL_DestroyTexture(texture);
 			SDL_DestroyRenderer(renderer);
 			SDL_DestroyWindow(screen);
