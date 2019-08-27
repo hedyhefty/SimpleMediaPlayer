@@ -32,7 +32,7 @@ extern "C" {
 #define FF_QUIT_EVENT (SDL_USEREVENT + 1)
 
 const double TIME_BASE = 1000000.0;
-const double AV_SYNC_THRESHOLD = 0.01;
+const double AV_SYNC_THRESHOLD = 0.05;
 
 int* quit_ref = nullptr;
 

@@ -36,7 +36,7 @@ int demux_thread(void* arg);
 
 static void event_loop(VideoState* is);
 
-const char* SRC_FILE = "test3.mpg";
+const char* SRC_FILE = "test4.mpg";
 
 int main() {
 	VideoState* is = new VideoState;
@@ -186,6 +186,42 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 				1
 			);
 			assert(data_size <= buf_size);
+
+			
+			double pts = is->audio_frame.best_effort_timestamp;
+			if (pts != AV_NOPTS_VALUE) {
+				int delta_size;
+				pts *= av_q2d(is->audio_st->time_base);
+				double ref_time = get_master_clock(is);
+				double diff = pts - ref_time;
+				//std::cout << "diff: " << diff << std::endl;
+
+				if (fabs(diff) > AV_SYNC_THRESHOLD) {
+					std::cout << "tunning" << std::endl;
+					int n = 2 * is->audio_ctx->channels;
+					delta_size = int(diff * is->audio_ctx->sample_rate) * n;
+
+					if (delta_size > 0) {
+						if (delta_size > buf_size / 2) {
+							delta_size = buf_size / 2 - data_size;
+						}
+						memcpy(audio_buf, is->audio_frame.data[0], data_size);
+						for (size_t i = 0; i < delta_size; ++i) {
+							memcpy(audio_buf + data_size + i, &is->audio_frame.data[0][data_size], 1);
+						}
+
+					}
+					else {
+						if (delta_size + data_size < data_size / 2) {
+							delta_size = -data_size;
+						}
+						memcpy(audio_buf, is->audio_frame.data[0], data_size + delta_size);
+					}
+
+					return data_size + delta_size;
+				}
+			}
+
 			memcpy(audio_buf, is->audio_frame.data[0], data_size);
 
 			//is->audio_pkt_data += pkt->size;
@@ -209,6 +245,7 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 		if (decode_succeed < 0) {
 			return -1;
 		}
+
 	}
 }
 
@@ -656,7 +693,7 @@ int demux_thread(void* arg) {
 			//else {
 			//	break;
 			//}
-			
+
 			//std::cout << "set allsent true" << std::endl;
 			break;
 		}
@@ -696,18 +733,18 @@ static void event_loop(VideoState* is) {
 			std::cout << "signal sent" << std::endl;
 
 			//SDL_PauseAudioDevice(is->dev_id, 1);
-			
+
 			SDL_WaitThread(is->demux_tid, nullptr);
 			std::cout << "demux closed" << std::endl;
 			SDL_WaitThread(is->video_tid, nullptr);
 			std::cout << "video closed" << std::endl;
 			//SDL_PauseAudioDevice(is->dev_id, 1);
-			
+
 			//SDL_LockAudioDevice(is->dev_id);
 			//std::cout << "lock" << std::endl;
 			SDL_CloseAudioDevice(is->dev_id);
 			std::cout << "audio closed" << std::endl;
-			
+
 			SDL_DestroyTexture(texture);
 			SDL_DestroyRenderer(renderer);
 			SDL_DestroyWindow(screen);
