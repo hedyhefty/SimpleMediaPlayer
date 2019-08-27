@@ -10,6 +10,10 @@ VideoState* global_video_state;
 
 void init_calculate_rect(VideoState* is);
 
+double get_master_clock(VideoState* is);
+
+double get_external_clock();
+
 Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque);
 
 void schedule_refresh(VideoState* is, int delay);
@@ -136,6 +140,16 @@ void init_calculate_rect(VideoState* is) {
 	is->rect.h = h;
 }
 
+double get_master_clock(VideoState* is) {
+	return get_external_clock();
+}
+
+double get_external_clock() {
+	static double start_time = av_gettime();
+
+	return (av_gettime() - start_time) / TIME_BASE;
+}
+
 Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque) {
 	SDL_Event event;
 	event.type = FF_REFRESH_EVENT;
@@ -159,6 +173,10 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 	for (;;) {
 		int got_frame = avcodec_receive_frame(is->audio_ctx, &is->audio_frame);
 
+		if (is->quit == 1) {
+			return -1;
+		}
+
 		if (got_frame == 0) {
 			data_size = av_samples_get_buffer_size(
 				nullptr,
@@ -170,13 +188,6 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 			assert(data_size <= buf_size);
 			memcpy(audio_buf, is->audio_frame.data[0], data_size);
 
-			//len1 = pkt->size;
-			//std::cout << "data size: " << data_size << std::endl;
-
-			//std::cout << "pktsize: " << pkt->size << std::endl;
-			//std::cout << "framesize: " << is->audio_frame.linesize[0] << std::endl;
-			//std::cout << "datasize: " << data_size << std::endl;
-
 			//is->audio_pkt_data += pkt->size;
 			//is->audio_pkt_size -= pkt->size;
 
@@ -186,10 +197,6 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 
 		if (pkt->data) {
 			av_packet_unref(pkt);
-		}
-
-		if (is->quit) {
-			return -1;
 		}
 
 		if (packet_queue_get(&is->audio_queue, pkt, 1) < 0) {
@@ -206,16 +213,13 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 }
 
 void audio_callback(void* userdata, Uint8* stream, int len) {
-
 	VideoState* is = (VideoState*)userdata;
 	int len1 = 0;
 	int audio_size = 0;
 
 	while (len > 0) {
 		if (is->quit == 1) {
-			SDL_LockAudioDevice(is->dev_id);
-			std::cout << "lock" << std::endl;
-			break;
+			return;
 		}
 
 		if (is->audio_buf_index >= is->audio_buf_size) {
@@ -244,6 +248,7 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 		stream += len1;
 		is->audio_buf_index += len1;
 	}
+
 }
 
 void video_display(VideoState* is) {
@@ -294,17 +299,58 @@ void video_display(VideoState* is) {
 
 void video_refresh_timer(void* userdata) {
 	VideoState* is = (VideoState*)userdata;
+	static double previous_pts = 0;
+	static double previous_time_delta = 0;
+	double delta_time = 0;
+	double pts = 0;
 
 	if (is->video_st) {
 		if (is->pFrameQ.size == 0) {
 			schedule_refresh(is, 1);
 		}
 		else {
-			schedule_refresh(is, 20);
+			/* pts here stand for the x'th frame of the video,
+			not the time of it should be present */
+			pts = frame_queue_get_pts(&is->pFrameQ);
+			if (pts == AV_NOPTS_VALUE) {
+				pts = previous_pts + previous_time_delta;
+			}
+			else {
+				// turn pts into second form
+				pts *= av_q2d(is->video_st->time_base);
+				//std::cout << "pts in second's form: " << pts << std::endl;
+			}
+
+			delta_time = pts - previous_pts;
+			if (delta_time <= 0 || delta_time >= 1.0) {
+				delta_time = previous_time_delta;
+			}
+
+			previous_pts = pts;
+			previous_time_delta = delta_time;
+
+			// ref time in seconds
+			double ref_time = get_master_clock(is);
+			double diff = pts - ref_time;
+
+			double time_per_frame = av_q2d(is->video_ctx->time_base);
+			double repeat_coeff = frame_queue_get_repeat_coeff(&is->pFrameQ);
+			double predict_delta = time_per_frame + repeat_coeff * (double)time_per_frame / 2 + diff;
+
+			int predict_result = predict_delta * 1000;
+			/*std::cout << "master clock: " << ref_time << std::endl;
+			std::cout << "diff: " << diff << std::endl;
+			std::cout << "predict delta: " << predict_result << std::endl;*/
+
+			int tunned_result = predict_result < 0 ? 0 : predict_result;
+
+			//std::cout << "tunned delta:" << tunned_result << std::endl;
+
+			schedule_refresh(is, tunned_result);
 
 			// show the picture
 			video_display(is);
-
+			//std::cout << "frame queue size:" << is->pFrameQ.size << std::endl;
 			// update queue for next picture
 			frame_queue_dequeue(&is->pFrameQ);
 		}
@@ -645,6 +691,7 @@ static void event_loop(VideoState* is) {
 			is->quit = 1;
 
 			SDL_CondSignal(is->video_queue.cond);
+			SDL_CondSignal(is->audio_queue.cond);
 			SDL_CondSignal(is->pFrameQ.cond);
 			std::cout << "signal sent" << std::endl;
 

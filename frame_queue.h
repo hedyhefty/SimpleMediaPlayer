@@ -90,3 +90,13 @@ myFrame* frame_queue_writablepos_ref(myFrameQueue* f) {
 	SDL_UnlockMutex(f->mutex);
 	return &f->queue[f->write_index];
 }
+
+double frame_queue_get_pts(myFrameQueue* f) {
+	double pts = 0;
+	pts = (double)f->queue[f->read_index].frame->best_effort_timestamp;
+	return pts;
+}
+
+int frame_queue_get_repeat_coeff(myFrameQueue* f) {
+	return f->queue[f->read_index].frame->repeat_pict;
+}

@@ -8,6 +8,7 @@ extern "C" {
 #include "libavformat/avformat.h"
 #include "libswscale/swscale.h"
 #include "libavutil/avstring.h"
+#include "libavutil/time.h"
 
 	// SDL define main and we should handle it with macro
 #define SDL_MAIN_HANDLED
@@ -29,6 +30,9 @@ extern "C" {
 
 #define FF_REFRESH_EVENT (SDL_USEREVENT)
 #define FF_QUIT_EVENT (SDL_USEREVENT + 1)
+
+const double TIME_BASE = 1000000.0;
+const double AV_SYNC_THRESHOLD = 0.01;
 
 int* quit_ref = nullptr;
 
