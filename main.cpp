@@ -32,7 +32,7 @@ int demux_thread(void* arg);
 
 static void event_loop(VideoState* is);
 
-const char* SRC_FILE = "test3.mpg";
+const char* SRC_FILE = "test5.mpg";
 
 int main() {
 	VideoState* is = new VideoState;
@@ -83,6 +83,7 @@ int main() {
 
 	event_loop(is);
 
+	std::cout << "cin out signal...";
 	int a;
 	std::cin >> a;
 
@@ -207,6 +208,12 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 	int audio_size;
 
 	while (len > 0) {
+		if (is->quit == 1) {
+			SDL_LockAudioDevice(is->dev_id);
+			std::cout << "lock" << std::endl;
+			break;
+		}
+
 		if (is->audio_buf_index >= is->audio_buf_size) {
 			audio_size = audio_decode_frame(is, is->audio_buf, sizeof(is->audio_buf));
 			//std::wcout << audio_size << std::endl;
@@ -270,6 +277,7 @@ void video_display(VideoState* is) {
 	SDL_RenderPresent(renderer);
 
 	if (vp->lastframe_flag) {
+		std::cout << "play the last frame" << std::endl;
 		SDL_Event sdl_event;
 		sdl_event.type = FF_QUIT_EVENT;
 		sdl_event.user.data1 = is;
@@ -315,6 +323,7 @@ int queue_picture(VideoState* is, AVFrame* pFrame) {
 
 	if (is->video_queue.all_sent && is->video_queue.nb_packets == 0) {
 		vp->lastframe_flag = true;
+		std::cout << "lastframe, queued." << std::endl;
 	}
 
 	// push frame queue
@@ -367,8 +376,9 @@ int video_thread(void* arg) {
 		av_frame_unref(pFrame);
 
 		av_packet_unref(packet);
-
+		//std::cout << is->video_queue.nb_packets << std::endl;
 		if (is->video_queue.all_sent && is->video_queue.nb_packets == 0) {
+			std::cout << "???" << std::endl;
 			break;
 		}
 	}
@@ -386,7 +396,6 @@ int stream_component_open(VideoState* is, int stream_index) {
 	AVCodec* codec = nullptr;
 	SDL_AudioSpec wanted_spec;
 	SDL_AudioSpec spec;
-	SDL_AudioDeviceID dev;
 
 
 	if (stream_index < 0 || stream_index >= (int)pFormatCtx->nb_streams) {
@@ -430,8 +439,8 @@ int stream_component_open(VideoState* is, int stream_index) {
 			return -1;
 		}
 
-		dev = SDL_OpenAudioDevice(nullptr, 0, &wanted_spec, &spec, SDL_AUDIO_NOT_ALLOW_ANY_CHANGE);
-		if (dev == 0) {
+		is->dev_id = SDL_OpenAudioDevice(nullptr, 0, &wanted_spec, &spec, SDL_AUDIO_NOT_ALLOW_ANY_CHANGE);
+		if (is->dev_id == 0) {
 			return -1;
 		}
 		if (wanted_spec.format != spec.format) {
@@ -458,7 +467,7 @@ int stream_component_open(VideoState* is, int stream_index) {
 
 		//memset(&is->audio_pkt, 0, sizeof(is->audio_pkt));
 		//SDL_PauseAudio(0);
-		SDL_PauseAudioDevice(dev, 0);
+		SDL_PauseAudioDevice(is->dev_id, 0);
 		break;
 
 	case AVMEDIA_TYPE_VIDEO:
@@ -587,7 +596,7 @@ int demux_thread(void* arg) {
 		//std::cout << i++ << std::endl;
 		int ret = av_read_frame(is->pFormatCtx, packet);
 		if (ret < 0) {
-			std::cout << ret << std::endl;
+			//std::cout << ret << std::endl;
 			//if (is->pFormatCtx->pb->error == 0) {
 			//	// no error, wait for input
 			//	SDL_Delay(1);
@@ -596,7 +605,8 @@ int demux_thread(void* arg) {
 			//else {
 			//	break;
 			//}
-			is->video_queue.all_sent = true;
+			
+			//std::cout << "set allsent true" << std::endl;
 			break;
 		}
 
@@ -612,6 +622,8 @@ int demux_thread(void* arg) {
 		av_packet_unref(packet);
 	}
 
+	is->video_queue.all_sent = true;
+	is->audio_queue.all_sent = true;
 	std::cout << "demux thread return" << std::endl;
 	return 0;
 }
@@ -631,9 +643,19 @@ static void event_loop(VideoState* is) {
 			SDL_CondSignal(is->pFrameQ.cond);
 			std::cout << "signal sent" << std::endl;
 
+			//SDL_PauseAudioDevice(is->dev_id, 1);
+			
 			SDL_WaitThread(is->demux_tid, nullptr);
+			std::cout << "demux closed" << std::endl;
 			SDL_WaitThread(is->video_tid, nullptr);
-
+			std::cout << "video closed" << std::endl;
+			//SDL_PauseAudioDevice(is->dev_id, 1);
+			
+			//SDL_LockAudioDevice(is->dev_id);
+			//std::cout << "lock" << std::endl;
+			SDL_CloseAudioDevice(is->dev_id);
+			std::cout << "audio closed" << std::endl;
+			
 			SDL_DestroyTexture(texture);
 			SDL_DestroyRenderer(renderer);
 			SDL_DestroyWindow(screen);

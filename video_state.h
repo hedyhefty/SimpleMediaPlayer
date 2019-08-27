@@ -17,6 +17,7 @@ public:
 		audio_pkt_data(nullptr),
 		audio_frame(),
 		audio_pkt(),
+		dev_id(0),
 		video_st(nullptr),
 		audio_st(nullptr),
 		sws_ctx(nullptr),
@@ -43,6 +44,7 @@ public:
 	AVFormatContext* pFormatCtx;
 
 	int audio_st_index;
+	SDL_AudioDeviceID dev_id;
 	AVStream* audio_st;
 	AVCodecContext* audio_ctx;
 	PacketQueue audio_queue;
