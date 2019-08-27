@@ -32,7 +32,7 @@ int demux_thread(void* arg);
 
 static void event_loop(VideoState* is);
 
-const char* SRC_FILE = "test5.mpg";
+const char* SRC_FILE = "test3.mpg";
 
 int main() {
 	VideoState* is = new VideoState;
@@ -173,8 +173,12 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 			//len1 = pkt->size;
 			//std::cout << "data size: " << data_size << std::endl;
 
-			is->audio_pkt_data += pkt->size;
-			is->audio_pkt_size -= pkt->size;
+			//std::cout << "pktsize: " << pkt->size << std::endl;
+			//std::cout << "framesize: " << is->audio_frame.linesize[0] << std::endl;
+			//std::cout << "datasize: " << data_size << std::endl;
+
+			//is->audio_pkt_data += pkt->size;
+			//is->audio_pkt_size -= pkt->size;
 
 			/* We have data, return it and come back for more later */
 			return data_size;
@@ -192,8 +196,8 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 			return -1;
 		}
 
-		is->audio_pkt_data = pkt->data;
-		is->audio_pkt_size = pkt->size;
+		//is->audio_pkt_data = pkt->data;
+		//is->audio_pkt_size = pkt->size;
 		int decode_succeed = avcodec_send_packet(is->audio_ctx, pkt);
 		if (decode_succeed < 0) {
 			return -1;
@@ -204,8 +208,8 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 void audio_callback(void* userdata, Uint8* stream, int len) {
 
 	VideoState* is = (VideoState*)userdata;
-	int len1;
-	int audio_size;
+	int len1 = 0;
+	int audio_size = 0;
 
 	while (len > 0) {
 		if (is->quit == 1) {
@@ -226,6 +230,7 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 			else {
 				is->audio_buf_size = audio_size;
 			}
+
 			is->audio_buf_index = 0;
 		}
 
