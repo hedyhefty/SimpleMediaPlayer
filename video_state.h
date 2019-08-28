@@ -43,6 +43,20 @@ public:
 
 	AVFormatContext* pFormatCtx;
 
+	// clock
+	double base_time = 0;
+	double speed_factor = 1;
+
+	// for seek
+	bool seek_req = false;
+	int64_t seek_pos = 0;
+	int64_t seek_rel = 0;
+	int seek_flag = 0;
+	bool video_pkt_flush = false;
+	bool audio_pkt_flush = false;
+
+	bool pframe_queue_flush = false;
+
 	int audio_st_index;
 	SDL_AudioDeviceID dev_id;
 	AVStream* audio_st;
@@ -55,7 +69,6 @@ public:
 	AVPacket audio_pkt;
 	uint8_t* audio_pkt_data;
 	int audio_pkt_size;
-
 
 	int video_st_index;
 	AVStream* video_st;

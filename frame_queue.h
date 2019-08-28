@@ -1,7 +1,7 @@
 #pragma once
 #include "util.h"
 
-const size_t VIDEO_PICTURE_QUEUE_SIZE = 64;
+const size_t VIDEO_PICTURE_QUEUE_SIZE = 16;
 
 class myFrame {
 public:
@@ -56,17 +56,36 @@ myFrame* frame_queue_get_last_ref(myFrameQueue* f) {
 	return &f->queue[f->read_index];
 }
 
+myFrame* frame_queue_dequeue_pri(myFrameQueue* f) {
+	if (f->size == 0) {
+		return nullptr;
+	}
+	myFrame* ret = new myFrame;
+	myFrame* lastf = frame_queue_get_last_ref(f);
+	av_frame_move_ref(ret->frame, lastf->frame);
+	
+	ret->lastframe_flag = lastf->lastframe_flag;
+
+	av_frame_unref(lastf->frame);
+	lastf->lastframe_flag = false;
+	return ret;
+}
+
 // dequeue read queue
-void frame_queue_dequeue(myFrameQueue* f) {
-	av_frame_unref(f->queue[f->read_index].frame);
+void frame_queue_update_read_index(myFrameQueue* f) {
 	if (++(f->read_index) == f->max_size) {
 		f->read_index = 0;
 	}
+}
 
+myFrame* frame_queue_dequeue(myFrameQueue* f) {
 	SDL_LockMutex(f->mutex);
+	myFrame* ret = new myFrame;
+	ret = frame_queue_dequeue_pri(f);
+	frame_queue_update_read_index(f);
 	--(f->size);
-	SDL_CondSignal(f->cond);
 	SDL_UnlockMutex(f->mutex);
+	return ret;
 }
 
 // check and get writable position in frame queue
@@ -99,4 +118,19 @@ double frame_queue_get_pts(myFrameQueue* f) {
 
 int frame_queue_get_repeat_coeff(myFrameQueue* f) {
 	return f->queue[f->read_index].frame->repeat_pict;
+}
+
+void frame_queue_flush(myFrameQueue* f) {
+	SDL_LockMutex(f->mutex);
+	size_t fsize = f->size;
+	for (size_t i = 0; i < fsize; ++i) {
+		av_frame_unref(f->queue[f->read_index].frame);
+		f->queue[f->read_index].lastframe_flag = false;
+		if (++(f->read_index) == f->max_size) {
+			f->read_index = 0;
+		}
+		--(f->size);
+	}
+	//std::cout << "nothing left in frame queue" << std::endl;
+	SDL_UnlockMutex(f->mutex);
 }

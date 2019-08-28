@@ -31,10 +31,14 @@ extern "C" {
 #define FF_REFRESH_EVENT (SDL_USEREVENT)
 #define FF_QUIT_EVENT (SDL_USEREVENT + 1)
 
+
+const double SEEK_SAFE_FRACTOR = 0.99;
 const double TIME_BASE = 1000000.0;
 const double AV_SYNC_THRESHOLD = 0.05;
 
 int* quit_ref = nullptr;
+
+AVPacket flush_pkt;
 
 #include "packet_queue.h"
 #include "frame_queue.h"

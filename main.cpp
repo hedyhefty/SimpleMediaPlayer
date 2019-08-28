@@ -12,7 +12,11 @@ void init_calculate_rect(VideoState* is);
 
 double get_master_clock(VideoState* is);
 
-double get_external_clock();
+double get_external_clock(VideoState* is);
+
+void reset_clock(VideoState* is);
+
+void stream_seek(VideoState* is, double pos, double rel);
 
 Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque);
 
@@ -36,7 +40,7 @@ int demux_thread(void* arg);
 
 static void event_loop(VideoState* is);
 
-const char* SRC_FILE = "test4.mpg";
+const char* SRC_FILE = "test3.mpg";
 
 int main() {
 	VideoState* is = new VideoState;
@@ -84,6 +88,9 @@ int main() {
 	if (!renderer) {
 		std::cout << "SDL: cannot create renderer" << std::endl;
 	}
+
+	av_init_packet(&flush_pkt);
+	flush_pkt.data = (unsigned char*)"FLUSH";
 
 	event_loop(is);
 
@@ -141,13 +148,35 @@ void init_calculate_rect(VideoState* is) {
 }
 
 double get_master_clock(VideoState* is) {
-	return get_external_clock();
+	return get_external_clock(is);
 }
 
-double get_external_clock() {
-	static double start_time = av_gettime();
+double get_external_clock(VideoState* is) {
+	return (av_gettime() - is->base_time) / TIME_BASE;
+}
 
-	return (av_gettime() - start_time) / TIME_BASE;
+void reset_clock(VideoState* is) {
+	is->base_time -= is->seek_rel;
+}
+
+void stream_seek(VideoState* is, double pos, double rel) {
+	if (!is->seek_req) {
+		is->seek_pos = (int64_t)(pos * AV_TIME_BASE);
+		is->seek_rel = (int64_t)(rel * AV_TIME_BASE);
+		is->seek_flag = ((rel < 0) ? AVSEEK_FLAG_BACKWARD : 0);
+
+		if (is->seek_pos > (int64_t)((double)is->pFormatCtx->duration * SEEK_SAFE_FRACTOR)) {
+			return;
+		}
+
+		is->seek_req = true;
+
+		/*std::cout << "pos: " << is->seek_pos << std::endl;
+		std::cout << "dur: " << is->pFormatCtx->duration << std::endl;
+		std::cout << "save dur: " << (int64_t)((double)is->pFormatCtx->duration 
+		* SEEK_SAFE_FRACTOR) << std::endl;*/
+		//std::cout << "flag: " << is->seek_flag << std::endl;
+	}
 }
 
 Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque) {
@@ -187,17 +216,21 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 			);
 			assert(data_size <= buf_size);
 
-			
+			// sync audio code start here
 			double pts = is->audio_frame.best_effort_timestamp;
 			if (pts != AV_NOPTS_VALUE) {
 				int delta_size;
 				pts *= av_q2d(is->audio_st->time_base);
+				
 				double ref_time = get_master_clock(is);
 				double diff = pts - ref_time;
+
 				//std::cout << "diff: " << diff << std::endl;
+				//std::cout << "master clock: " << get_master_clock(is) << std::endl;
+				//std::cout << "pts: " << pts << std::endl;
 
 				if (fabs(diff) > AV_SYNC_THRESHOLD) {
-					std::cout << "tunning" << std::endl;
+					//std::cout << "tunning" << std::endl;
 					int n = 2 * is->audio_ctx->channels;
 					delta_size = int(diff * is->audio_ctx->sample_rate) * n;
 
@@ -221,6 +254,7 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 					return data_size + delta_size;
 				}
 			}
+			// sync audio code end
 
 			memcpy(audio_buf, is->audio_frame.data[0], data_size);
 
@@ -231,12 +265,24 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 			return data_size;
 		}
 
+		/*if (is->audio_pkt_flush) {
+			avcodec_flush_buffers(is->audio_ctx);
+			is->audio_pkt_flush = false;
+		}*/
+
 		if (pkt->data) {
 			av_packet_unref(pkt);
 		}
 
 		if (packet_queue_get(&is->audio_queue, pkt, 1) < 0) {
 			return -1;
+		}
+
+		if (pkt->data == flush_pkt.data) {
+			avcodec_flush_buffers(is->audio_ctx);
+			is->audio_pkt_flush = false;
+			//std::cout << "audio codec flushed" << std::endl;
+			continue;
 		}
 
 		//is->audio_pkt_data = pkt->data;
@@ -293,7 +339,8 @@ void video_display(VideoState* is) {
 	//AVFrame* frame;
 	//frame = av_frame_alloc();
 
-	vp = frame_queue_get_last_ref(&is->pFrameQ);
+	vp = frame_queue_dequeue(&is->pFrameQ);
+	
 	//av_frame_move_ref(frame, vp->frame);
 	//av_frame_unref(vp->frame);
 
@@ -331,6 +378,8 @@ void video_display(VideoState* is) {
 		SDL_Delay(100);
 		SDL_PushEvent(&sdl_event);
 	}
+
+	delete vp;
 	//av_frame_free(&frame);
 }
 
@@ -341,6 +390,17 @@ void video_refresh_timer(void* userdata) {
 	double delta_time = 0;
 	double pts = 0;
 
+	
+
+	if (is->pframe_queue_flush) {
+		frame_queue_flush(&is->pFrameQ);
+		//std::cout << "size: " << is->pFrameQ.size << std::endl;
+		reset_clock(is);
+		is->pframe_queue_flush = false;
+		schedule_refresh(is, 10);
+		return;
+	}
+
 	if (is->video_st) {
 		if (is->pFrameQ.size == 0) {
 			schedule_refresh(is, 1);
@@ -350,6 +410,7 @@ void video_refresh_timer(void* userdata) {
 			not the time of it should be present */
 			pts = frame_queue_get_pts(&is->pFrameQ);
 			if (pts == AV_NOPTS_VALUE) {
+				return;
 				pts = previous_pts + previous_time_delta;
 			}
 			else {
@@ -375,11 +436,16 @@ void video_refresh_timer(void* userdata) {
 			double predict_delta = time_per_frame + repeat_coeff * (double)time_per_frame / 2 + diff;
 
 			int predict_result = predict_delta * 1000;
-			/*std::cout << "master clock: " << ref_time << std::endl;
-			std::cout << "diff: " << diff << std::endl;
-			std::cout << "predict delta: " << predict_result << std::endl;*/
+			//std::cout << "pts:" << pts << std::endl;
+			//std::cout << "master clock: " << ref_time << std::endl;
+			//std::cout << "diff: " << diff << std::endl;
+			//std::cout << "predict delta: " << predict_result << std::endl;
 
 			int tunned_result = predict_result < 0 ? 0 : predict_result;
+
+			if (tunned_result >= 1000) {
+				tunned_result = 20;
+			}
 
 			//std::cout << "tunned delta:" << tunned_result << std::endl;
 
@@ -389,7 +455,7 @@ void video_refresh_timer(void* userdata) {
 			video_display(is);
 			//std::cout << "frame queue size:" << is->pFrameQ.size << std::endl;
 			// update queue for next picture
-			frame_queue_dequeue(&is->pFrameQ);
+			//frame_queue_dequeue(&is->pFrameQ);
 		}
 	}
 	else {
@@ -442,17 +508,29 @@ int video_thread(void* arg) {
 	int ret = 0;
 
 	for (;;) {
+
 		if (is->quit == 1) {
 			break;
 		}
 
+		/*if (is->video_pkt_flush) {
+			avcodec_flush_buffers(is->video_ctx);
+			is->video_pkt_flush = false;
+		}*/
+
 		ret = packet_queue_get(&is->video_queue, packet, 1);
-
-
 		if (ret < 0) {
 			// quit getting packets
 			break;
 		}
+
+		if (packet->data == flush_pkt.data) {
+			avcodec_flush_buffers(is->video_ctx);
+			is->video_pkt_flush = false;
+			//std::cout << "video codec flushed" << std::endl;
+			continue;
+		}
+
 		// decode video frame
 		avcodec_send_packet(is->video_ctx, packet);
 		frameFinished = avcodec_receive_frame(is->video_ctx, pFrame);
@@ -463,10 +541,10 @@ int video_thread(void* arg) {
 		}
 		av_frame_unref(pFrame);
 
-		av_packet_unref(packet);
+		//av_packet_unref(packet);
 		//std::cout << is->video_queue.nb_packets << std::endl;
 		if (is->video_queue.all_sent && is->video_queue.nb_packets == 0) {
-			std::cout << "???" << std::endl;
+			//std::cout << "???" << std::endl;
 			break;
 		}
 	}
@@ -669,9 +747,46 @@ int demux_thread(void* arg) {
 		return -1;
 	}
 
+	is->base_time = av_gettime();
+
+	// std::cout << "dur: " << is->pFormatCtx->duration << std::endl;
+
 	for (;;) {
 		if (is->quit == 1) {
 			break;
+		}
+
+		// seek code start
+		if (is->seek_req) {
+			int64_t seek_target = is->seek_pos;
+
+			int ret = av_seek_frame(is->pFormatCtx, -1, seek_target, is->seek_flag);
+			if (ret < 0) {
+				std::cout << "seek failed" << std::endl;
+			}
+			else {
+				if (is->audio_st_index >= 0) {
+					packet_queue_flush(&is->audio_queue);
+					packet_queue_put(&is->audio_queue, &flush_pkt);
+					is->audio_pkt_flush = true;
+				}
+
+				if (is->video_st_index >= 0) {
+					packet_queue_flush(&is->video_queue);
+					packet_queue_put(&is->video_queue, &flush_pkt);
+					is->video_pkt_flush = true;
+					is->pframe_queue_flush = true;
+				}
+			}
+
+			is->seek_req = false;
+		}
+		// seek code end
+
+		// wait until frame queue flush
+		if (is->pframe_queue_flush||is->video_pkt_flush||is->audio_pkt_flush) {
+			SDL_Delay(10);
+			continue;
 		}
 
 		if (is->video_queue.size > MAX_VIDEOQ_SIZE
@@ -707,7 +822,7 @@ int demux_thread(void* arg) {
 		}
 
 
-		av_packet_unref(packet);
+		//av_packet_unref(packet);
 	}
 
 	is->video_queue.all_sent = true;
@@ -718,10 +833,44 @@ int demux_thread(void* arg) {
 
 static void event_loop(VideoState* is) {
 	SDL_Event sdl_event;
+	double incr = 0;
+	double pos = 0;
+	bool jump = false;
 
 	for (;;) {
 		SDL_WaitEvent(&sdl_event);
 		switch (sdl_event.type) {
+		case SDL_KEYDOWN:
+			switch (sdl_event.key.keysym.sym) {
+			case SDLK_LEFT:
+				incr = -5;
+				jump = true;
+				break;
+			case SDLK_RIGHT:
+				incr = 5;
+				jump = true;
+				break;
+			case SDLK_UP:
+				break;
+			case SDLK_DOWN:
+				break;
+			default:
+				break;
+			}
+			if (global_video_state && jump) {
+				jump = false;
+				pos = get_master_clock(global_video_state);
+				pos += incr;
+				if (pos < 0) {
+					incr = - get_master_clock(global_video_state);
+					pos = 0;
+				}
+				//std::cout << "incr: " << incr << std::endl;
+				//std::cout << "pos: " << pos << std::endl;
+				stream_seek(global_video_state, pos, incr);
+			}
+			break;
+
 		case FF_QUIT_EVENT:
 		case SDL_QUIT:
 

@@ -39,17 +39,17 @@ public:
 
 int packet_queue_put(PacketQueue* q, AVPacket* pkt) {
 	AVPacketList* pkt1;
-	if (av_packet_make_refcounted(pkt) < 0) {
+	if (pkt != &flush_pkt && av_packet_make_refcounted(pkt) < 0) {
 		return -1;
 	}
 
-	pkt1 = (AVPacketList*)av_malloc(sizeof(AVPacketList));
+	pkt1 = (AVPacketList*)av_mallocz(sizeof(AVPacketList));
 	if (!pkt1) {
 		return -1;
 	}
 
-	av_packet_ref(&pkt1->pkt, pkt);
-	//pkt1->pkt = *pkt;
+	//av_packet_ref(&pkt1->pkt, pkt);
+	pkt1->pkt = *pkt;
 	pkt1->next = nullptr;
 
 	SDL_LockMutex(q->mutex);
@@ -112,4 +112,25 @@ int packet_queue_get(PacketQueue* q, AVPacket* pkt, int block) {
 	SDL_UnlockMutex(q->mutex);
 
 	return ret;
+}
+
+void packet_queue_flush(PacketQueue* q) {
+	AVPacketList* pkt;
+	AVPacketList* pkt1;
+
+	SDL_LockMutex(q->mutex);
+
+	for (pkt = q->first_pkt; pkt != nullptr; pkt = pkt1) {
+		pkt1 = pkt->next;
+		av_packet_unref(&pkt->pkt);
+		av_freep(&pkt);
+	}
+
+	q->last_pkt = nullptr;
+	q->first_pkt = nullptr;
+	q->nb_packets = 0;
+	q->size = 0;
+
+	//std::cout << "nothing left in queue" << std::endl;
+	SDL_UnlockMutex(q->mutex);
 }
