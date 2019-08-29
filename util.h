@@ -36,6 +36,9 @@ const double SEEK_SAFE_FRACTOR = 0.99;
 const double TIME_BASE = 1000000.0;
 const double AV_SYNC_THRESHOLD = 0.05;
 
+const bool SPEED_UP_FLAG = false;
+const bool SLOW_DOWN_FLAG = true;
+
 int* quit_ref = nullptr;
 
 AVPacket flush_pkt;

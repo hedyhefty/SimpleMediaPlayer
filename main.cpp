@@ -16,6 +16,8 @@ double get_external_clock(VideoState* is);
 
 void reset_clock(VideoState* is);
 
+void tun_clock(VideoState* is, bool flag);
+
 void stream_seek(VideoState* is, double pos, double rel);
 
 Uint32 sdl_refresh_timer_cb(Uint32 interval, void* opaque);
@@ -152,11 +154,22 @@ double get_master_clock(VideoState* is) {
 }
 
 double get_external_clock(VideoState* is) {
-	return (av_gettime() - is->base_time) / TIME_BASE;
+	double real_time = (is->speed_factor * ((av_gettime() - is->base_time) / TIME_BASE)) + is->time_stamp;
+	std::cout << real_time << std::endl;
+	std::cout << is->speed_factor << std::endl;
+	return real_time;
 }
 
 void reset_clock(VideoState* is) {
-	is->base_time -= is->seek_rel;
+	is->base_time -= (int64_t)(double(is->seek_rel) / is->speed_factor);
+}
+
+void tun_clock(VideoState* is, bool flag) {
+	double factor = is->speed_factor;
+	double time = get_master_clock(is);
+
+	is->time_stamp = time;
+	is->base_time = av_gettime();
 }
 
 void stream_seek(VideoState* is, double pos, double rel) {
@@ -340,6 +353,7 @@ void video_display(VideoState* is) {
 	//frame = av_frame_alloc();
 
 	vp = frame_queue_dequeue(&is->pFrameQ);
+	
 	
 	//av_frame_move_ref(frame, vp->frame);
 	//av_frame_unref(vp->frame);
@@ -836,6 +850,8 @@ static void event_loop(VideoState* is) {
 	double incr = 0;
 	double pos = 0;
 	bool jump = false;
+	bool speed_up = false;
+	bool slow_down = false;
 
 	for (;;) {
 		SDL_WaitEvent(&sdl_event);
@@ -851,12 +867,28 @@ static void event_loop(VideoState* is) {
 				jump = true;
 				break;
 			case SDLK_UP:
+				speed_up = true;
 				break;
 			case SDLK_DOWN:
+				slow_down = true;
 				break;
 			default:
 				break;
 			}
+			if (speed_up && is->speed_factor < 7) {
+				std::cout << "speed up called" << std::endl;
+				speed_up = false;
+				tun_clock(is, SPEED_UP_FLAG);
+				is->speed_factor *= 2;
+			}
+
+			if (slow_down && is->speed_factor > 0.3) {
+				std::cout << "speed down called" << std::endl;
+				slow_down = false;
+				tun_clock(is, SLOW_DOWN_FLAG);
+				is->speed_factor *= 0.5;
+			}
+
 			if (global_video_state && jump) {
 				jump = false;
 				pos = get_master_clock(global_video_state);

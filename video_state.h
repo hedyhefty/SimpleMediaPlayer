@@ -45,6 +45,7 @@ public:
 
 	// clock
 	double base_time = 0;
+	double time_stamp = 0;
 	double speed_factor = 1;
 
 	// for seek
