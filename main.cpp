@@ -1,6 +1,19 @@
 #include "util.h"
+#include "video_state.h"
 #include <iostream>
 
+#define FF_REFRESH_EVENT (SDL_USEREVENT)
+#define FF_QUIT_EVENT (SDL_USEREVENT + 1)
+
+const int SDL_AUDIO_NOT_ALLOW_ANY_CHANGE = 0;
+const uint16_t SDL_AUDIO_BUFFER_SIZE = 1024;
+const int MAX_AUDIOQ_SIZE = (5 * 16 * 1024);
+const int MAX_VIDEOQ_SIZE = (5 * 256 * 1024);
+const double SEEK_SAFE_FRACTOR = 0.99;
+const double TIME_BASE = 1000000.0;
+const double AV_SYNC_THRESHOLD = 0.05;
+const bool SPEED_UP_FLAG = false;
+const bool SLOW_DOWN_FLAG = true;
 
 SDL_Window* screen;
 static SDL_Renderer* renderer;
@@ -8,7 +21,13 @@ SDL_Texture* texture;
 
 VideoState* global_video_state;
 
+AVPacket flush_pkt;
+
+void program_fail(VideoState* is);
+
 void init_calculate_rect(VideoState* is);
+
+void init_YUV_display_par(VideoState* is);
 
 double get_master_clock(VideoState* is);
 
@@ -149,6 +168,24 @@ void init_calculate_rect(VideoState* is) {
 	is->rect.h = h;
 }
 
+void init_YUV_display_par(VideoState* is) {
+	// set up YV12 pixel array
+	is->yuv_display.yPlaneSz = is->video_ctx->width * is->video_ctx->height;
+	is->yuv_display.uvPlaneSz = is->video_ctx->width * is->video_ctx->height / 4;
+	is->yuv_display.yPlane = new Uint8[is->yuv_display.yPlaneSz];
+	is->yuv_display.uPlane = new Uint8[is->yuv_display.uvPlaneSz];
+	is->yuv_display.vPlane = new Uint8[is->yuv_display.uvPlaneSz];
+
+	is->yuv_display.uvPitch = is->video_ctx->width / 2;
+
+	is->yuv_display.pict.data[0] = is->yuv_display.yPlane;
+	is->yuv_display.pict.data[1] = is->yuv_display.uPlane;
+	is->yuv_display.pict.data[2] = is->yuv_display.vPlane;
+	is->yuv_display.pict.linesize[0] = is->video_ctx->width;
+	is->yuv_display.pict.linesize[1] = is->yuv_display.uvPitch;
+	is->yuv_display.pict.linesize[2] = is->yuv_display.uvPitch;
+}
+
 double get_master_clock(VideoState* is) {
 	return get_external_clock(is);
 }
@@ -287,7 +324,11 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 			av_packet_unref(pkt);
 		}
 
-		if (packet_queue_get(&is->audio_queue, pkt, 1) < 0) {
+		/*if (packet_queue_get(&is->audio_queue, pkt, 1) < 0) {
+			return -1;
+		}*/
+
+		if (is->audio_queue.packet_queue_get(pkt, 1) < 0) {
 			return -1;
 		}
 
@@ -352,8 +393,8 @@ void video_display(VideoState* is) {
 	//AVFrame* frame;
 	//frame = av_frame_alloc();
 
-	vp = frame_queue_dequeue(&is->pFrameQ);
-	
+	//vp = frame_queue_dequeue(&is->pFrameQ);
+	vp = is->pFrameQ.frame_queue_dequeue();
 	
 	//av_frame_move_ref(frame, vp->frame);
 	//av_frame_unref(vp->frame);
@@ -407,7 +448,8 @@ void video_refresh_timer(void* userdata) {
 	
 
 	if (is->pframe_queue_flush) {
-		frame_queue_flush(&is->pFrameQ);
+		//frame_queue_flush(&is->pFrameQ);
+		is->pFrameQ.frame_queue_flush();
 		//std::cout << "size: " << is->pFrameQ.size << std::endl;
 		reset_clock(is);
 		is->pframe_queue_flush = false;
@@ -422,7 +464,8 @@ void video_refresh_timer(void* userdata) {
 		else {
 			/* pts here stand for the x'th frame of the video,
 			not the time of it should be present */
-			pts = frame_queue_get_pts(&is->pFrameQ);
+			//pts = frame_queue_get_pts(&is->pFrameQ);
+			pts = is->pFrameQ.frame_queue_get_pts();
 			if (pts == AV_NOPTS_VALUE) {
 				return;
 				pts = previous_pts + previous_time_delta;
@@ -446,7 +489,8 @@ void video_refresh_timer(void* userdata) {
 			double diff = pts - ref_time;
 
 			double time_per_frame = av_q2d(is->video_ctx->time_base);
-			double repeat_coeff = frame_queue_get_repeat_coeff(&is->pFrameQ);
+			//double repeat_coeff = frame_queue_get_repeat_coeff(&is->pFrameQ);
+			double repeat_coeff = is->pFrameQ.frame_queue_get_repeat_coeff();
 			double predict_delta = time_per_frame + repeat_coeff * (double)time_per_frame / 2 + diff;
 
 			int predict_result = predict_delta * 1000;
@@ -481,7 +525,8 @@ int queue_picture(VideoState* is, AVFrame* pFrame) {
 	myFrame* vp;
 
 	// wait until have place to write
-	vp = frame_queue_writablepos_ref(&is->pFrameQ);
+	//vp = frame_queue_writablepos_ref(&is->pFrameQ);
+	vp = is->pFrameQ.frame_queue_writablepos_ref();
 
 	if (!vp || is->quit == 1) {
 		return -1;
@@ -532,7 +577,8 @@ int video_thread(void* arg) {
 			is->video_pkt_flush = false;
 		}*/
 
-		ret = packet_queue_get(&is->video_queue, packet, 1);
+		//ret = packet_queue_get(&is->video_queue, packet, 1);
+		ret = is->video_queue.packet_queue_get(packet, 1);
 		if (ret < 0) {
 			// quit getting packets
 			break;
@@ -644,6 +690,7 @@ int stream_component_open(VideoState* is, int stream_index) {
 		is->audio_ctx = codecCtx;
 		is->audio_buf_size = 0;
 		is->audio_buf_index = 0;
+		is->audio_queue.flush_pkt_p = &flush_pkt;
 
 		//memset(&is->audio_pkt, 0, sizeof(is->audio_pkt));
 		//SDL_PauseAudio(0);
@@ -687,6 +734,8 @@ int stream_component_open(VideoState* is, int stream_index) {
 			std::cout << "SDL: cannot create texture" << std::endl;
 			return -1;
 		}
+
+		is->video_queue.flush_pkt_p = &flush_pkt;
 		break;
 	default:
 		break;
@@ -705,7 +754,6 @@ int demux_thread(void* arg) {
 	int audio_index = -1;
 
 	global_video_state = is;
-	quit_ref = &global_video_state->quit;
 
 	//int i = 0;
 
@@ -780,14 +828,18 @@ int demux_thread(void* arg) {
 			}
 			else {
 				if (is->audio_st_index >= 0) {
-					packet_queue_flush(&is->audio_queue);
-					packet_queue_put(&is->audio_queue, &flush_pkt);
+					//packet_queue_flush(&is->audio_queue);
+					//packet_queue_put(&is->audio_queue, &flush_pkt);
+					is->audio_queue.packet_queue_flush();
+					is->audio_queue.packet_queue_put(&flush_pkt);
 					is->audio_pkt_flush = true;
 				}
 
 				if (is->video_st_index >= 0) {
-					packet_queue_flush(&is->video_queue);
-					packet_queue_put(&is->video_queue, &flush_pkt);
+					//packet_queue_flush(&is->video_queue);
+					//packet_queue_put(&is->video_queue, &flush_pkt);
+					is->video_queue.packet_queue_flush();
+					is->video_queue.packet_queue_put(&flush_pkt);
 					is->video_pkt_flush = true;
 					is->pframe_queue_flush = true;
 				}
@@ -829,10 +881,12 @@ int demux_thread(void* arg) {
 
 		// send packet to queue
 		if (packet->stream_index == is->video_st_index) {
-			packet_queue_put(&is->video_queue, packet);
+			//packet_queue_put(&is->video_queue, packet);
+			is->video_queue.packet_queue_put(packet);
 		}
 		else if (packet->stream_index == is->audio_st_index) {
-			packet_queue_put(&is->audio_queue, packet);
+			//packet_queue_put(&is->audio_queue, packet);
+			is->audio_queue.packet_queue_put(packet);
 		}
 
 
