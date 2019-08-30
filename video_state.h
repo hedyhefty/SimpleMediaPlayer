@@ -34,12 +34,15 @@ public:
 	AVCodecContext* audio_ctx = nullptr;
 	PacketQueue audio_queue = {};
 	uint8_t audio_buf[(MAX_AUDIO_FRAME_SIZE * 3) / 2] = {};
+	uint8_t audio_temp_buf[(MAX_AUDIO_FRAME_SIZE) * 3 / 2] = {};
 	size_t audio_buf_size = 0;
 	size_t audio_buf_index = 0;
-	AVFrame audio_frame = {};
 	AVPacket audio_pkt = {};
 	uint8_t* audio_pkt_data = nullptr;
 	int audio_pkt_size = 0;
+	SwrContext* swr_ctx;
+	AVSampleFormat dst_format = AV_SAMPLE_FMT_S16;
+	AVFrame* audio_frame = nullptr;
 
 	int video_st_index = 0;
 	AVStream* video_st = nullptr;

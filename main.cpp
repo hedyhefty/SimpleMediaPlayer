@@ -15,6 +15,8 @@ const double AV_SYNC_THRESHOLD = 0.05;
 const bool SPEED_UP_FLAG = false;
 const bool SLOW_DOWN_FLAG = true;
 
+const char* SRC_FILE = "test4.mp4";
+
 SDL_Window* screen;
 static SDL_Renderer* renderer;
 SDL_Texture* texture;
@@ -60,8 +62,6 @@ int stream_component_open(VideoState* is, int stream_index);
 int demux_thread(void* arg);
 
 static void event_loop(VideoState* is);
-
-const char* SRC_FILE = "test3.mpg";
 
 int main() {
 	VideoState* is = new VideoState;
@@ -192,8 +192,8 @@ double get_master_clock(VideoState* is) {
 
 double get_external_clock(VideoState* is) {
 	double real_time = (is->speed_factor * ((av_gettime() - is->base_time) / TIME_BASE)) + is->time_stamp;
-	std::cout << real_time << std::endl;
-	std::cout << is->speed_factor << std::endl;
+	//std::cout << real_time << std::endl;
+	//std::cout << is->speed_factor << std::endl;
 	return real_time;
 }
 
@@ -248,26 +248,26 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 	int len1 = 0;
 	int data_size = 0;
 	AVPacket* pkt = &is->audio_pkt;
+	AVFrame* frame = is->audio_frame;
 
 	for (;;) {
-		int got_frame = avcodec_receive_frame(is->audio_ctx, &is->audio_frame);
+		int got_frame = avcodec_receive_frame(is->audio_ctx, frame);
 
 		if (is->quit == 1) {
 			return -1;
 		}
 
 		if (got_frame == 0) {
-			data_size = av_samples_get_buffer_size(
-				nullptr,
-				is->audio_ctx->channels,
-				is->audio_frame.nb_samples,
-				is->audio_ctx->sample_fmt,
-				1
-			);
+			int dst_nb_samples = av_rescale_rnd(swr_get_delay(is->swr_ctx, frame->sample_rate) + frame->nb_samples, frame->sample_rate, frame->sample_rate, AVRounding(1));
+			Uint8* p = is->audio_temp_buf;
+			int nb = swr_convert(is->swr_ctx, &p, dst_nb_samples, (const uint8_t * *)frame->data, frame->nb_samples);
+			data_size = frame->channels * nb * av_get_bytes_per_sample(is->dst_format);
+
 			assert(data_size <= buf_size);
+			//return data_size;
 
 			// sync audio code start here
-			double pts = is->audio_frame.best_effort_timestamp;
+			double pts = frame->best_effort_timestamp;
 			if (pts != AV_NOPTS_VALUE) {
 				int delta_size;
 				pts *= av_q2d(is->audio_st->time_base);
@@ -288,9 +288,9 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 						if (delta_size > buf_size / 2) {
 							delta_size = buf_size / 2 - data_size;
 						}
-						memcpy(audio_buf, is->audio_frame.data[0], data_size);
+						memcpy(audio_buf, is->audio_temp_buf, data_size);
 						for (size_t i = 0; i < delta_size; ++i) {
-							memcpy(audio_buf + data_size + i, &is->audio_frame.data[0][data_size], 1);
+							memcpy(audio_buf + data_size + i, &is->audio_temp_buf[data_size], 1);
 						}
 
 					}
@@ -298,15 +298,15 @@ int audio_decode_frame(VideoState* is, uint8_t* audio_buf, int buf_size) {
 						if (delta_size + data_size < data_size / 2) {
 							delta_size = -data_size;
 						}
-						memcpy(audio_buf, is->audio_frame.data[0], data_size + delta_size);
+						memcpy(audio_buf, is->audio_temp_buf, data_size + delta_size);
 					}
 
 					return data_size + delta_size;
 				}
 			}
 			// sync audio code end
-
-			memcpy(audio_buf, is->audio_frame.data[0], data_size);
+			
+			memcpy(audio_buf, is->audio_temp_buf, data_size);
 
 			//is->audio_pkt_data += pkt->size;
 			//is->audio_pkt_size -= pkt->size;
@@ -381,6 +381,7 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 		}
 		auto temp = (uint8_t*)is->audio_buf + is->audio_buf_index;
 		memcpy(stream, temp, len1);
+		//SDL_MixAudio(stream, temp, len1, SDL_MIX_MAXVOLUME);
 		len -= len1;
 		stream += len1;
 		is->audio_buf_index += len1;
@@ -434,6 +435,7 @@ void video_display(VideoState* is) {
 		SDL_PushEvent(&sdl_event);
 	}
 
+	
 	delete vp;
 	//av_frame_free(&frame);
 }
@@ -651,6 +653,10 @@ int stream_component_open(VideoState* is, int stream_index) {
 			codecCtx->request_sample_fmt = AV_SAMPLE_FMT_S16;
 		}
 
+		if (codecCtx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
+			codecCtx->request_sample_fmt = AV_SAMPLE_FMT_FLT;
+		}
+		std::cout << codecCtx->sample_fmt << std::endl;
 		//SDL_zero(wanted_spec);
 		wanted_spec.freq = codecCtx->sample_rate;
 		wanted_spec.format = AUDIO_S16SYS;
@@ -659,11 +665,6 @@ int stream_component_open(VideoState* is, int stream_index) {
 		wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE;
 		wanted_spec.callback = audio_callback;
 		wanted_spec.userdata = is;
-
-		if (SDL_OpenAudio(&wanted_spec, &spec) < 0) {
-			std::cout << "cannot open audio" << std::endl;
-			return -1;
-		}
 
 		is->dev_id = SDL_OpenAudioDevice(nullptr, 0, &wanted_spec, &spec, SDL_AUDIO_NOT_ALLOW_ANY_CHANGE);
 		if (is->dev_id == 0) {
@@ -683,6 +684,11 @@ int stream_component_open(VideoState* is, int stream_index) {
 		return -1;
 	}
 
+	int index;
+	int channels;
+	Uint64 channel_layout;
+	Uint64 dst_layout;
+
 	switch (codecCtx->codec_type) {
 	case AVMEDIA_TYPE_AUDIO:
 		is->audio_st_index = stream_index;
@@ -691,7 +697,37 @@ int stream_component_open(VideoState* is, int stream_index) {
 		is->audio_buf_size = 0;
 		is->audio_buf_index = 0;
 		is->audio_queue.flush_pkt_p = &flush_pkt;
+		
+		index = av_get_channel_layout_channel_index(av_get_default_channel_layout(4), AV_CH_FRONT_CENTER);
 
+		channels = is->audio_st->codecpar->channels;
+		channel_layout = is->audio_st->codecpar->channel_layout;
+
+		if (channels > 0 && channel_layout == 0) {
+			channel_layout = av_get_default_channel_layout(channels);
+		}
+		else if (channels == 0 && channel_layout > 0) {
+			channels = av_get_channel_layout_nb_channels(channel_layout);
+		}
+
+		dst_layout = av_get_default_channel_layout(channels);
+
+		swr_alloc_set_opts(
+			is->swr_ctx,
+			dst_layout,
+			is->dst_format,
+			is->audio_st->codecpar->sample_rate,
+			channel_layout,
+			(AVSampleFormat)is->audio_st->codecpar->format,
+			is->audio_st->codecpar->sample_rate,
+			0,
+			nullptr
+		);
+
+		if (!is->swr_ctx || swr_init(is->swr_ctx) < 0) {
+			program_fail(is);
+			return -1;
+		}
 		//memset(&is->audio_pkt, 0, sizeof(is->audio_pkt));
 		//SDL_PauseAudio(0);
 		SDL_PauseAudioDevice(is->dev_id, 0);
@@ -912,6 +948,9 @@ static void event_loop(VideoState* is) {
 		switch (sdl_event.type) {
 		case SDL_KEYDOWN:
 			switch (sdl_event.key.keysym.sym) {
+			case SDLK_ESCAPE:
+				program_fail(is);
+				break;
 			case SDLK_LEFT:
 				incr = -5;
 				jump = true;
@@ -930,14 +969,14 @@ static void event_loop(VideoState* is) {
 				break;
 			}
 			if (speed_up && is->speed_factor < 7) {
-				std::cout << "speed up called" << std::endl;
+				//std::cout << "speed up called" << std::endl;
 				speed_up = false;
 				tun_clock(is, SPEED_UP_FLAG);
 				is->speed_factor *= 2;
 			}
 
 			if (slow_down && is->speed_factor > 0.3) {
-				std::cout << "speed down called" << std::endl;
+				//std::cout << "speed down called" << std::endl;
 				slow_down = false;
 				tun_clock(is, SLOW_DOWN_FLAG);
 				is->speed_factor *= 0.5;
@@ -990,8 +1029,7 @@ static void event_loop(VideoState* is) {
 
 			std::cout << "exit" << std::endl;
 
-			goto exit;
-			break;
+			return;
 		case FF_REFRESH_EVENT:
 			video_refresh_timer(sdl_event.user.data1);
 			break;
@@ -999,7 +1037,4 @@ static void event_loop(VideoState* is) {
 			break;
 		}
 	}
-
-exit:
-	return;
 }

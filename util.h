@@ -8,6 +8,7 @@ extern "C" {
 #include "libswscale/swscale.h"
 #include "libavutil/avstring.h"
 #include "libavutil/time.h"
+#include "libswresample/swresample.h"
 
 	// SDL define main and we should handle it with macro
 #define SDL_MAIN_HANDLED
