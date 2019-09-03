@@ -52,6 +52,7 @@ public:
 	SwsContext* sws_ctx = nullptr;
 	SDL_Rect rect = {};  //output rectangle
 	YUVDisplayPar yuv_display = {};
+	AVCodecParameters* video_cpar = nullptr;
 
 	// video hw decode stuff
 	bool hw_decode_flag = true;

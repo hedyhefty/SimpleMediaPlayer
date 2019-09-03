@@ -510,12 +510,8 @@ void video_refresh_timer(void* userdata) {
 	double delta_time = 0;
 	double pts = 0;
 
-	
-
 	if (is->pframe_queue_flush) {
-		//frame_queue_flush(&is->pFrameQ);
 		is->pFrameQ.frame_queue_flush();
-		//std::cout << "size: " << is->pFrameQ.size << std::endl;
 		reset_clock(is);
 		is->pframe_queue_flush = false;
 		schedule_refresh(is, 10);
@@ -534,6 +530,7 @@ void video_refresh_timer(void* userdata) {
 			//std::cout << "pts: " << pts << std::endl;
 			if (pts == AV_NOPTS_VALUE) {
 				//return;
+				std::cout << "not good pts: " << pts << std::endl;
 				pts = previous_pts + previous_time_delta;
 			}
 			else {
@@ -553,27 +550,26 @@ void video_refresh_timer(void* userdata) {
 			// ref time in seconds
 			double ref_time = get_master_clock(is);
 			double diff = pts - ref_time;
-
 			double time_per_frame = av_q2d(is->video_ctx->time_base);
 			//double repeat_coeff = frame_queue_get_repeat_coeff(&is->pFrameQ);
 			double repeat_coeff = is->pFrameQ.frame_queue_get_repeat_coeff();
 			double predict_delta = time_per_frame + repeat_coeff * (double)time_per_frame / 2 + diff;
 
 			int predict_result = static_cast<int>(predict_delta * 1000);
-			//std::cout << "pts:" << pts << std::endl;
-			//std::cout << "master clock: " << ref_time << std::endl;
-			//std::cout << "diff: " << diff << std::endl;
+			/*std::cout << "pts:" << pts << std::endl;
+			std::cout << "master clock: " << ref_time << std::endl;
+			std::cout << "diff: " << diff << std::endl;*/
 			//std::cout << "predict delta: " << predict_result << std::endl;
 
 			int tunned_result = predict_result < 0 ? 0 : predict_result;
 
 			if (tunned_result >= 1000) {
-				tunned_result = 20;
+				tunned_result = 40;
 			}
 
 			//std::cout << "tunned delta:" << tunned_result << std::endl;
 
-			schedule_refresh(is, 20);
+			schedule_refresh(is, tunned_result);
 
 			// show the picture
 			video_display(is);
@@ -746,7 +742,7 @@ int hw_video_thread(void* arg) {
 			std::cout << "error during decode" << std::endl;
 		}
 
-		std::cout << "decode by hw" << std::endl;
+		//std::cout << "decode by hw" << std::endl;
 
 		while (ret >= 0) {
 			if (is->quit == 1) {
@@ -768,7 +764,17 @@ int hw_video_thread(void* arg) {
 			}
 
 			y420p_frame = nv12_to_yuv420p(sw_frame);
-			y420p_frame->pts = packet->pts;
+			int64_t pts = packet->pts;
+			int64_t dts = packet->dts;
+
+			int64_t delay = pts - dts;
+			if (delay < 0) {
+				delay = 1000;
+			}
+			//std::cout << hw_frame->pts << std::endl;
+			y420p_frame->pts = hw_frame->pts;
+			y420p_frame->best_effort_timestamp = hw_frame->best_effort_timestamp;
+			
 			if (!y420p_frame) {
 				break;
 			}
@@ -906,6 +912,7 @@ int stream_component_open(VideoState* is, int stream_index) {
 		is->video_st_index = stream_index;
 		is->video_st = pFormatCtx->streams[stream_index];
 		is->video_ctx = codecCtx;
+		is->video_cpar = is->video_st->codecpar;
 
 		//frame_queue_init(&is->pFrameQ);
 		//packet_queue_init(&is->video_queue);
@@ -1049,12 +1056,12 @@ int hw_video_open(VideoState* is, int stream_index) {
 	is->video_ctx = codecCtx;
 	is->video_st = video_st;
 	is->video_st_index = stream_index;
+	is->video_cpar = video_st->codecpar;
+
+	is->video_ctx->time_base = av_stream_get_codec_timebase(video_st);
 
 	int w = video_st->codecpar->width;
 	int h = video_st->codecpar->height;
-
-	is->video_ctx->height = h;
-	is->video_ctx->width = w;
 	
 	is->sws_ctx = sws_getContext(
 		w, h,
